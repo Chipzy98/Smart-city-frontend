@@ -40,6 +40,7 @@ const menus: Record<Role, MenuItem[]> = {
   ],
   user: [
     { name: "Dashboard", path: "/dashboard", icon: LayoutDashboard },
+    { name: "Traffic", path: "/traffic", icon: Map },
     { name: "Waste", path: "/waste", icon: Trash2 },
     { name: "Energy", path: "/energy", icon: Zap },
   ],

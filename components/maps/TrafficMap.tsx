@@ -6,7 +6,6 @@ export type LatLng        = { lat: number; lng: number };
 export type TrafficPoint  = { lat: number; lng: number; congestionLevel: number };
 export type RouteWaypoint = { lat: number; lng: number };
 
-// Extended point with TomTom speed data
 export type RealtimePoint = {
   locationName:     string;
   latitude:         number;
@@ -33,7 +32,7 @@ export type RouteOption = {
 
 type Props = {
   trafficPoints?:   TrafficPoint[];
-  realtimePoints?:  RealtimePoint[];   // ← TomTom live data
+  realtimePoints?:  RealtimePoint[];
   onLocationPick?:  (latlng: LatLng) => void;
   selectionMode?:   "origin" | "destination" | null;
   pickedLocation?:  LatLng | null;
@@ -45,21 +44,48 @@ type Props = {
   height?:          string;
 };
 
-function routeColor(congestion: number, selected: boolean): string {
-  if (selected)          return "#6366f1";
-  if (congestion >= 75)  return "#ef4444";
-  if (congestion >= 40)  return "#f59e0b";
-  return "#22c55e";
-}
+// Route colors
+const ROUTE_COLORS = ["#6366f1", "#f59e0b", "#22c55e", "#ef4444", "#8b5cf6"];
 
-function speedColor(congestion: number): string {
-  if (congestion >= 75) return "#ef4444";
-  if (congestion >= 40) return "#f59e0b";
+function congestionColor(c: number, selected: boolean): string {
+  if (selected) return "#6366f1";
+  if (c >= 75)  return "#ef4444";
+  if (c >= 40)  return "#f59e0b";
   return "#22c55e";
 }
 
 const SL_CENTER: [number, number] = [7.8731, 80.7718];
 
+// ── OSRM: fetch real road geometry between waypoints ──────────────────────
+async function fetchOSRMRoute(waypoints: RouteWaypoint[]): Promise<[number, number][]> {
+  if (waypoints.length < 2) return [];
+
+  try {
+    // OSRM public demo server — free, no key needed
+    const coords = waypoints.map((w) => `${w.lng},${w.lat}`).join(";");
+    const url    = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`;
+
+    const res  = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return fallbackPath(waypoints);
+
+    const data = await res.json();
+    if (data.code !== "Ok" || !data.routes?.length) return fallbackPath(waypoints);
+
+    // GeoJSON coordinates are [lng, lat] — flip to [lat, lng] for Leaflet
+    return data.routes[0].geometry.coordinates.map(
+      ([lng, lat]: [number, number]): [number, number] => [lat, lng]
+    );
+  } catch {
+    return fallbackPath(waypoints);
+  }
+}
+
+// Fallback: straight line through waypoints
+function fallbackPath(waypoints: RouteWaypoint[]): [number, number][] {
+  return waypoints.map((w): [number, number] => [w.lat, w.lng]);
+}
+
+// ── Component ──────────────────────────────────────────────────────────────
 export default function TrafficMap({
   trafficPoints  = [],
   realtimePoints = [],
@@ -77,14 +103,14 @@ export default function TrafficMap({
   const mapRef         = useRef<L.Map | null>(null);
   const initializedRef = useRef(false);
 
-  const pickedRef      = useRef<L.CircleMarker | null>(null);
-  const originDotRef   = useRef<L.CircleMarker | null>(null);
-  const originLblRef   = useRef<L.Marker | null>(null);
-  const destDotRef     = useRef<L.CircleMarker | null>(null);
-  const destLblRef     = useRef<L.Marker | null>(null);
-  const routeLinesRef  = useRef<L.Polyline[]>([]);
-  const circlesRef     = useRef<L.CircleMarker[]>([]);
-  const realtimeRef    = useRef<(L.CircleMarker | L.Marker)[]>([]);
+  const pickedRef     = useRef<L.CircleMarker | null>(null);
+  const originDotRef  = useRef<L.CircleMarker | null>(null);
+  const originLblRef  = useRef<L.Marker | null>(null);
+  const destDotRef    = useRef<L.CircleMarker | null>(null);
+  const destLblRef    = useRef<L.Marker | null>(null);
+  const routeLinesRef = useRef<L.Layer[]>([]);
+  const circlesRef    = useRef<L.CircleMarker[]>([]);
+  const realtimeRef   = useRef<L.Layer[]>([]);
 
   // ── Init ──────────────────────────────────────────────────────────────
   const initMap = useCallback(() => {
@@ -95,7 +121,7 @@ export default function TrafficMap({
       // @ts-expect-error _getIconUrl
       delete L.Icon.Default.prototype._getIconUrl;
 
-      const map = L.map(containerRef.current, { center: SL_CENTER, zoom: 8, zoomControl: true });
+      const map = L.map(containerRef.current, { center: SL_CENTER, zoom: 8 });
       L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
         maxZoom: 19,
@@ -115,7 +141,7 @@ export default function TrafficMap({
     return () => {
       if (mapRef.current) {
         mapRef.current.remove();
-        mapRef.current = null;
+        mapRef.current         = null;
         initializedRef.current = false;
       }
     };
@@ -128,7 +154,7 @@ export default function TrafficMap({
     containerRef.current.style.cursor = selectionMode ? "crosshair" : "grab";
   }, [selectionMode]);
 
-  // ── DB traffic circles (historical) ───────────────────────────────────
+  // ── DB traffic circles ────────────────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -136,76 +162,52 @@ export default function TrafficMap({
       circlesRef.current.forEach((c) => c.remove());
       circlesRef.current = [];
       trafficPoints.forEach((p) => {
-        const color = speedColor(p.congestionLevel);
+        const color = p.congestionLevel >= 75 ? "#ef4444" : p.congestionLevel >= 40 ? "#f59e0b" : "#22c55e";
         circlesRef.current.push(
           L.circleMarker([p.lat, p.lng], {
             radius: Math.max(7, p.congestionLevel / 9),
             fillColor: color, color, weight: 1, opacity: 0.7, fillOpacity: 0.35,
-          }).bindPopup(`<b>Historical Congestion:</b> ${p.congestionLevel.toFixed(0)}%`).addTo(map)
+          }).bindPopup(`<b>Congestion:</b> ${p.congestionLevel.toFixed(0)}%`).addTo(map)
         );
       });
     });
   }, [trafficPoints]);
 
-  // ── TomTom real-time circles (live) ───────────────────────────────────
+  // ── TomTom real-time circles ──────────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
     import("leaflet").then((L) => {
-      realtimeRef.current.forEach((l) => l.remove());
+      realtimeRef.current.forEach((l) => (l as L.Layer).remove());
       realtimeRef.current = [];
-
       realtimePoints.forEach((p) => {
-        const color  = speedColor(p.congestionLevel);
+        const color  = p.congestionLevel >= 75 ? "#ef4444" : p.congestionLevel >= 40 ? "#f59e0b" : "#22c55e";
         const radius = Math.max(14, 30 - p.congestionLevel / 5);
 
-        // Outer glow
         const glow = L.circleMarker([p.latitude, p.longitude], {
-          radius:      radius + 6,
-          fillColor:   color,
-          color:       color,
-          weight:      1,
-          opacity:     0.2,
-          fillOpacity: 0.15,
+          radius: radius + 6, fillColor: color, color, weight: 1, opacity: 0.2, fillOpacity: 0.15,
         }).addTo(map);
 
-        // Main circle with speed label
         const circle = L.circleMarker([p.latitude, p.longitude], {
-          radius,
-          fillColor:   color,
-          color:       "#fff",
-          weight:      2.5,
-          opacity:     1,
-          fillOpacity: 0.85,
+          radius, fillColor: color, color: "#fff", weight: 2.5, opacity: 1, fillOpacity: 0.85,
         }).bindPopup(`
-          <div style="min-width:180px;padding:6px">
-            <b style="font-size:13px;color:${color}">🚗 ${p.locationName}</b>
-            <hr style="margin:5px 0"/>
-            <table style="font-size:12px;width:100%">
-              <tr><td>⚡ Current Speed</td><td><b>${p.currentSpeedKmh} km/h</b></td></tr>
-              <tr><td>🏎️ Free Flow</td><td><b>${p.freeFlowSpeedKmh} km/h</b></td></tr>
-              <tr><td>🚦 Congestion</td><td><b style="color:${color}">${p.congestionLevel.toFixed(0)}%</b></td></tr>
-              <tr><td>📊 Status</td><td><b>${p.congestionStatus}</b></td></tr>
-              <tr><td>🎯 Confidence</td><td><b>${(p.confidence * 100).toFixed(0)}%</b></td></tr>
-            </table>
-            <p style="font-size:10px;color:#888;margin-top:5px">Live data from TomTom</p>
+          <div style="min-width:170px;padding:6px">
+            <b style="color:${color}">🚗 ${p.locationName}</b><hr style="margin:5px 0"/>
+            <div style="font-size:12px">
+              ⚡ Current: <b>${p.currentSpeedKmh} km/h</b><br/>
+              🏎️ Free flow: <b>${p.freeFlowSpeedKmh} km/h</b><br/>
+              🚦 <b style="color:${color}">${p.congestionStatus}</b>
+            </div>
+            <p style="font-size:10px;color:#888;margin-top:4px">TomTom Live</p>
           </div>
         `).addTo(map);
 
-        // Speed number label on circle
         const label = L.marker([p.latitude, p.longitude], {
           icon: L.divIcon({
-            html: `<div style="
-              color:#fff;font-weight:900;font-size:10px;
-              text-align:center;line-height:1.1;
-              pointer-events:none;
-              text-shadow:0 1px 2px rgba(0,0,0,0.5);">
-              ${p.currentSpeedKmh.toFixed(0)}<br/>
-              <span style="font-size:8px">km/h</span>
-            </div>`,
-            iconSize:   [40, 30],
-            iconAnchor: [20, 15],
-            className:  "",
+            html: `<div style="color:#fff;font-weight:900;font-size:10px;text-align:center;
+              line-height:1.1;pointer-events:none;text-shadow:0 1px 2px rgba(0,0,0,0.5);">
+              ${p.currentSpeedKmh.toFixed(0)}<br/><span style="font-size:8px">km/h</span></div>`,
+            iconSize: [40, 30], iconAnchor: [20, 15], className: "",
           }),
           interactive: false,
         }).addTo(map);
@@ -257,10 +259,8 @@ export default function TrafficMap({
           { radius: 20, fillColor: "#2563eb", color: "#2563eb", weight: 1, fillOpacity: 0.12 }
         ).addTo(map);
         originLblRef.current = L.marker(
-          [originLocation.lat, originLocation.lng],
-          { icon: pin("A", "#2563eb"), interactive: false }
-        ).bindPopup(`<b style="color:#2563eb">📍 Starting Point</b><br/><small>${originLocation.lat.toFixed(5)}, ${originLocation.lng.toFixed(5)}</small>`)
-         .addTo(map);
+          [originLocation.lat, originLocation.lng], { icon: pin("A", "#2563eb"), interactive: false }
+        ).bindPopup(`<b style="color:#2563eb">📍 Starting Point</b>`).addTo(map);
       }
 
       if (destLocation) {
@@ -269,10 +269,8 @@ export default function TrafficMap({
           { radius: 20, fillColor: "#16a34a", color: "#16a34a", weight: 1, fillOpacity: 0.12 }
         ).addTo(map);
         destLblRef.current = L.marker(
-          [destLocation.lat, destLocation.lng],
-          { icon: pin("B", "#16a34a"), interactive: false }
-        ).bindPopup(`<b style="color:#16a34a">🏁 Destination</b><br/><small>${destLocation.lat.toFixed(5)}, ${destLocation.lng.toFixed(5)}</small>`)
-         .addTo(map);
+          [destLocation.lat, destLocation.lng], { icon: pin("B", "#16a34a"), interactive: false }
+        ).bindPopup(`<b style="color:#16a34a">🏁 Destination</b>`).addTo(map);
       }
 
       if (originLocation && destLocation && routes.length === 0) {
@@ -288,31 +286,55 @@ export default function TrafficMap({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [originLocation, destLocation]);
 
-  // ── Route lines ───────────────────────────────────────────────────────
+  // ── Route lines via OSRM real road geometry ───────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    import("leaflet").then((L) => {
-      routeLinesRef.current.forEach((l) => l.remove());
-      routeLinesRef.current = [];
-      if (routes.length === 0) return;
 
+    // Clear old lines
+    routeLinesRef.current.forEach((l) => (l as L.Layer).remove());
+    routeLinesRef.current = [];
+
+    if (routes.length === 0) return;
+
+    import("leaflet").then(async (L) => {
       const allBounds: [number, number][] = [];
-      routes.forEach((route, idx) => {
-        if (route.waypoints.length < 2) return;
-        const isSelected = idx === selectedRoute;
-        const color      = routeColor(route.congestionLevel, isSelected);
-        const latlngs    = route.waypoints.map((w): [number, number] => [w.lat, w.lng]);
-        latlngs.forEach((p) => allBounds.push(p));
 
-        const halo = L.polyline(latlngs, { color: "#fff", weight: isSelected ? 10 : 7, opacity: 0.6 }).addTo(map);
-        const line = L.polyline(latlngs, {
-          color, weight: isSelected ? 7 : 4, opacity: isSelected ? 1 : 0.75,
-          dashArray: isSelected ? undefined : "10 6",
+      // Fetch OSRM routes in parallel
+      const roadPaths = await Promise.all(
+        routes.map((route) => fetchOSRMRoute(route.waypoints))
+      );
+
+      roadPaths.forEach((path, idx) => {
+        if (path.length < 2) return;
+
+        const route      = routes[idx];
+        const isSelected = idx === selectedRoute;
+        const color      = isSelected
+          ? ROUTE_COLORS[0]
+          : congestionColor(route.congestionLevel, false);
+
+        path.forEach((p) => allBounds.push(p));
+
+        // White halo for contrast
+        const halo = L.polyline(path, {
+          color:   "#fff",
+          weight:  isSelected ? 12 : 8,
+          opacity: 0.7,
+        }).addTo(map);
+
+        // Colored road line
+        const line = L.polyline(path, {
+          color,
+          weight:    isSelected ? 8 : 5,
+          opacity:   isSelected ? 1 : 0.75,
+          dashArray: isSelected ? undefined : "1 0", // solid for all
+          lineJoin:  "round",
+          lineCap:   "round",
         }).bindPopup(`
-          <div style="min-width:190px;padding:6px">
-            <b>${route.isRecommended ? "⭐ " : ""}${route.routeName}</b><br/>
-            <small style="color:#666">${route.roadNames}</small><br/>
+          <div style="min-width:200px;padding:6px">
+            <b style="font-size:13px">${route.isRecommended ? "⭐ " : ""}${route.routeName}</b><br/>
+            <small style="color:#666">${route.roadNames}</small>
             <hr style="margin:5px 0"/>
             <div style="font-size:12px">
               📏 ${route.distanceKm} km &nbsp;|&nbsp;
@@ -322,22 +344,47 @@ export default function TrafficMap({
               🚦 <b style="color:${color}">${route.congestionStatus}</b>
             </div>
             <p style="font-size:11px;color:#555;margin-top:5px">${route.reason}</p>
-            ${onRouteSelect ? `<button onclick="window.__selectRoute(${idx})"
-              style="margin-top:7px;width:100%;background:${color};color:#fff;
-              border:none;border-radius:8px;padding:6px;font-weight:bold;cursor:pointer;font-size:12px;">
-              Select Route</button>` : ""}
+            ${onRouteSelect
+              ? `<button onclick="window.__selectRoute(${idx})"
+                  style="margin-top:8px;width:100%;background:${color};color:#fff;
+                  border:none;border-radius:8px;padding:6px;font-weight:bold;cursor:pointer;font-size:12px;">
+                  Select This Route</button>`
+              : ""}
           </div>
         `).addTo(map);
 
         line.on("click", () => onRouteSelect?.(idx));
         halo.on("click", () => onRouteSelect?.(idx));
         routeLinesRef.current.push(halo, line);
+
+        // Add distance label at midpoint of selected route
+        if (isSelected && path.length > 2) {
+          const mid   = path[Math.floor(path.length / 2)];
+          const label = L.marker(mid, {
+            icon: L.divIcon({
+              html: `<div style="background:${color};color:#fff;font-size:11px;font-weight:700;
+                padding:3px 8px;border-radius:12px;white-space:nowrap;
+                box-shadow:0 2px 6px rgba(0,0,0,0.25);">
+                ${route.distanceKm} km · ${Math.floor(route.estimatedMinutes / 60) > 0
+                  ? `${Math.floor(route.estimatedMinutes / 60)}h${route.estimatedMinutes % 60}m`
+                  : `${route.estimatedMinutes}m`}
+              </div>`,
+              className:  "",
+              iconAnchor: [40, 12],
+            }),
+            interactive: false,
+          }).addTo(map);
+          routeLinesRef.current.push(label);
+        }
       });
 
       if (onRouteSelect)
         (window as unknown as Record<string, unknown>).__selectRoute = onRouteSelect;
-      if (allBounds.length > 0)
+
+      // Fit map to show all routes
+      if (allBounds.length > 0) {
         map.fitBounds(L.latLngBounds(allBounds), { padding: [60, 60] });
+      }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routes, selectedRoute]);
@@ -345,7 +392,11 @@ export default function TrafficMap({
   return (
     <>
       <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossOrigin="" />
-      <div ref={containerRef} style={{ height, width: "100%" }} className="z-0 overflow-hidden rounded-3xl shadow-lg" />
+      <div
+        ref={containerRef}
+        style={{ height, width: "100%" }}
+        className="z-0 overflow-hidden rounded-3xl shadow-lg"
+      />
     </>
   );
 }

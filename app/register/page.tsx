@@ -15,6 +15,8 @@ type RegisterForm = {
   role: Role;
 };
 
+const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:7261";
+
 export default function RegisterPage() {
   const router = useRouter();
 
@@ -32,31 +34,27 @@ export default function RegisterPage() {
     e: ChangeEvent<HTMLInputElement | HTMLSelectElement>
   ) => {
     const { name, value } = e.target;
-
-    setForm((prev) => ({
-      ...prev,
-      [name]: value as Role,
-    }));
+    setForm((prev) => ({ ...prev, [name]: value as Role }));
   };
 
   const handleRegister = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-
     try {
       setLoading(true);
       setError("");
 
-      const res = await axios.post(
-        "http://localhost:5000/api/auth/register",
-        form
-      );
+      const res = await axios.post(`${BACKEND}/api/auth/register`, form);
 
       localStorage.setItem("token", res.data.token);
       localStorage.setItem("user", JSON.stringify(res.data.user));
 
       router.push("/dashboard");
-    } catch {
-      setError("Registration failed. Please check your details.");
+    } catch (err: unknown) {
+      if (axios.isAxiosError(err) && err.response?.data?.error) {
+        setError(err.response.data.error);
+      } else {
+        setError("Registration failed. Please check your details.");
+      }
     } finally {
       setLoading(false);
     }
@@ -75,7 +73,6 @@ export default function RegisterPage() {
           <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white text-blue-700 shadow-lg">
             <Leaf size={26} />
           </div>
-
           <div>
             <h1 className="text-3xl font-extrabold">Create Account</h1>
             <p className="text-sm text-blue-50">Join EcoCity Dashboard</p>
@@ -92,7 +89,7 @@ export default function RegisterPage() {
           <User size={18} className="text-green-100" />
           <input
             name="name"
-            placeholder="Name"
+            placeholder="Full Name"
             className="w-full bg-transparent text-sm font-medium text-white outline-none placeholder:text-blue-100"
             onChange={handleChange}
             required
@@ -116,7 +113,8 @@ export default function RegisterPage() {
           <input
             name="password"
             type="password"
-            placeholder="Password"
+            placeholder="Password (min 6 characters)"
+            minLength={6}
             className="w-full bg-transparent text-sm font-medium text-white outline-none placeholder:text-blue-100"
             onChange={handleChange}
             required
@@ -131,15 +129,9 @@ export default function RegisterPage() {
             onChange={handleChange}
             value={form.role}
           >
-            <option className="text-slate-900" value="user">
-              User
-            </option>
-            <option className="text-slate-900" value="manager">
-              Manager
-            </option>
-            <option className="text-slate-900" value="admin">
-              Admin
-            </option>
+            <option className="text-slate-900" value="user">User</option>
+            <option className="text-slate-900" value="manager">Manager</option>
+            <option className="text-slate-900" value="admin">Admin</option>
           </select>
         </div>
 

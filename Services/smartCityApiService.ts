@@ -9,42 +9,42 @@ import type {
   EnergyPredictRequest,
 } from "@/types/api";
 
-// Traffic
+// ── Traffic ────────────────────────────────────────────────────────────────
 export const getLiveTrafficAsync = async () => {
-  return axiosGetFromApiAsync("/api/traffic/live");
+  return axiosGetFromApiAsync("/api/smartcity/traffic/summary");
 };
 
 export const predictTrafficAsync = async (data: TrafficPredictRequest) => {
-  return axiosPostToApiAsync("/api/traffic/predict", data);
+  return axiosPostToApiAsync("/api/smartcity/traffic/predict", data);
 };
 
-// Waste
+// ── Waste ──────────────────────────────────────────────────────────────────
 export const getMyWasteRecordsAsync = async () => {
-  return axiosGetFromApiAsync("/api/waste/my-records");
+  return axiosGetFromApiAsync("/api/smartcity/waste/my-records");
 };
 
 export const classifyWasteAsync = async (data: WasteClassifyRequest) => {
-  return axiosPostToApiAsync("/api/waste/classify", data);
+  return axiosPostToApiAsync("/api/smartcity/waste/classify", data);
 };
 
-// Energy
+// ── Energy ─────────────────────────────────────────────────────────────────
 export const getMyEnergyUsageAsync = async () => {
-  return axiosGetFromApiAsync("/api/energy/my-usage");
+  return axiosGetFromApiAsync("/api/smartcity/energy/my-usage");
 };
 
 export const predictEnergyAsync = async (data: EnergyPredictRequest) => {
-  return axiosPostToApiAsync("/api/energy/predict", data);
+  return axiosPostToApiAsync("/api/smartcity/energy/predict", data);
 };
 
-// Dashboard
+// ── Dashboard ──────────────────────────────────────────────────────────────
 export const getAdminDashboardAsync = async () => {
-  return axiosGetFromApiAsync("/api/dashboard/admin");
+  return axiosGetFromApiAsync("/api/smartcity/dashboard/admin");
 };
 
 export const getManagerDashboardAsync = async () => {
-  return axiosGetFromApiAsync("/api/dashboard/manager");
+  return axiosGetFromApiAsync("/api/smartcity/dashboard/manager");
 };
 
 export const getUserDashboardAsync = async () => {
-  return axiosGetFromApiAsync("/api/dashboard/user");
+  return axiosGetFromApiAsync("/api/smartcity/dashboard/user");
 };

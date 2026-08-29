@@ -11,44 +11,39 @@ type LoginForm = {
   password: string;
 };
 
+// Backend URL — .env.local: NEXT_PUBLIC_BACKEND_URL=http://localhost:7261
+const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:7261";
+
 export default function LoginPage() {
   const router = useRouter();
 
-  const [form, setForm] = useState<LoginForm>({
-    email: "",
-    password: "",
-  });
-
+  const [form, setForm] = useState<LoginForm>({ email: "", password: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
-
-    setForm((prev) => ({
-      ...prev,
-      [name]: value,
-    }));
+    setForm((prev) => ({ ...prev, [name]: value }));
   };
 
   const handleLogin = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-
     try {
       setLoading(true);
       setError("");
 
-      const res = await axios.post(
-        "http://localhost:5000/api/auth/login",
-        form
-      );
+      const res = await axios.post(`${BACKEND}/api/auth/login`, form);
 
       localStorage.setItem("token", res.data.token);
       localStorage.setItem("user", JSON.stringify(res.data.user));
 
       router.push("/dashboard");
-    } catch {
-      setError("Login failed. Please check your email and password.");
+    } catch (err: unknown) {
+      if (axios.isAxiosError(err) && err.response?.data?.error) {
+        setError(err.response.data.error);
+      } else {
+        setError("Login failed. Please check your email and password.");
+      }
     } finally {
       setLoading(false);
     }
@@ -67,7 +62,6 @@ export default function LoginPage() {
           <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white text-blue-700 shadow-lg">
             <Leaf size={26} />
           </div>
-
           <div>
             <h1 className="text-3xl font-extrabold">Welcome Back</h1>
             <p className="text-sm text-blue-50">Login to EcoCity Dashboard</p>
@@ -113,7 +107,15 @@ export default function LoginPage() {
           {loading ? "Logging in..." : "Login"}
         </button>
 
-        <p className="mt-6 text-center text-sm text-blue-50">
+        {/* Demo credentials hint */}
+        <div className="mt-4 rounded-2xl border border-white/20 bg-white/10 px-4 py-3 text-xs text-blue-100">
+          <p className="font-semibold mb-1">Demo accounts:</p>
+          <p>admin@ecocity.com / Admin@123</p>
+          <p>manager@ecocity.com / Manager@123</p>
+          <p>user@ecocity.com / User@123</p>
+        </div>
+
+        <p className="mt-4 text-center text-sm text-blue-50">
           No account?{" "}
           <Link href="/register" className="font-bold text-white underline">
             Register

@@ -10,7 +10,7 @@ import DashboardLayout from "@/components/layout/DashboardLayout";
 import {
   getMyEnergyUsageFromApiAsync,
   predictEnergyFromApiAsync,
-} from "@/api/smartCityApi";
+} from "@/app/api/smartCityApi";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 

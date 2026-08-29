@@ -10,7 +10,7 @@ import {
   getAdminDashboardFromApiAsync,
   getManagerDashboardFromApiAsync,
   getUserDashboardFromApiAsync,
-} from "@/api/smartCityApi";
+} from "@/app/api/smartCityApi";
 
 type Role = "admin" | "manager" | "user";
 

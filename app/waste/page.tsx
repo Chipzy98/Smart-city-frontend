@@ -13,7 +13,7 @@ import DashboardLayout from "@/components/layout/DashboardLayout";
 import {
   classifyWasteFromApiAsync,
   getMyWasteRecordsFromApiAsync,
-} from "@/api/smartCityApi";
+} from "@/app/api/smartCityApi";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 

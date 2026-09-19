@@ -1,3 +1,5 @@
+// D:\Chipzy\ESOFT LEC\Final project\smart-city-frontend\smart-city-frontend\types\api.ts
+
 export type TrafficPredictRequest = {
   hour:         number;
   day:          number;

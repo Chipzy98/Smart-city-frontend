@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -14,18 +14,18 @@ type MenuItem = { name: string; path: string; icon: LucideIcon };
 
 const menus: Record<Role, MenuItem[]> = {
   admin: [
-    { name: "Dashboard",   path: "/dashboard",  icon: LayoutDashboard },
-    { name: "Traffic",     path: "/traffic",    icon: Map             },
-    { name: "Waste",       path: "/waste",      icon: Trash2          },
-    { name: "Energy",      path: "/energy",     icon: Zap             },
-    { name: "AI Training", path: "/ai-training", icon: Brain          },
+    { name: "Dashboard",   path: "/dashboard",   icon: LayoutDashboard },
+    { name: "Traffic",     path: "/traffic",     icon: Map             },
+    { name: "Waste",       path: "/waste",       icon: Trash2          },
+    { name: "Energy",      path: "/energy",      icon: Zap             },
+    { name: "AI Training", path: "/ai-training", icon: Brain           },
   ],
   manager: [
-    { name: "Dashboard",   path: "/dashboard",  icon: LayoutDashboard },
-    { name: "Traffic",     path: "/traffic",    icon: Map             },
-    { name: "Waste",       path: "/waste",      icon: Trash2          },
-    { name: "Energy",      path: "/energy",     icon: Zap             },
-    { name: "AI Training", path: "/ai-training", icon: Brain          },
+    { name: "Dashboard",   path: "/dashboard",   icon: LayoutDashboard },
+    { name: "Traffic",     path: "/traffic",     icon: Map             },
+    { name: "Waste",       path: "/waste",       icon: Trash2          },
+    { name: "Energy",      path: "/energy",      icon: Zap             },
+    { name: "AI Training", path: "/ai-training", icon: Brain           },
   ],
   user: [
     { name: "Dashboard", path: "/dashboard", icon: LayoutDashboard },
@@ -35,30 +35,34 @@ const menus: Record<Role, MenuItem[]> = {
   ],
 };
 
-// Read localStorage safely — returns null on server
-function readUser(): User | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const s = localStorage.getItem("user");
-    return s ? (JSON.parse(s) as User) : null;
-  } catch {
-    return null;
-  }
-}
+// All items rendered server-side (admin menu = most items).
+// After mount, items not in the real role's menu are hidden via CSS.
+const ALL_ITEMS = menus.admin;
+
+// Always render ALL menu items on server + first client paint.
+// After hydration, swap to the real role from localStorage.
+const DEFAULT_ROLE: Role = "admin"; // render all items → no count mismatch
 
 export default function Sidebar() {
   const router   = useRouter();
   const pathname = usePathname();
 
-  // Lazy initializer runs once on the CLIENT only.
-  // Server always gets null → default shown → no hydration mismatch.
-  // No useEffect / setState needed → no ESLint warning.
-  const [user] = useState<User>(() => readUser() ?? { role: "user", name: "" });
+  const [mounted, setMounted] = useState(false);
+  const [user,    setUser]    = useState<User>({ role: DEFAULT_ROLE, name: "" });
+
+  // Run only on client, after first paint — safe to read localStorage
+  useEffect(() => {
+    try {
+      const s = localStorage.getItem("user");
+      if (s) setUser(JSON.parse(s) as User);
+    } catch { /* ignore */ }
+    setMounted(true);
+  }, []);
 
   const role: Role =
     user.role === "admin" || user.role === "manager" || user.role === "user"
       ? user.role
-      : "user";
+      : DEFAULT_ROLE;
 
   const logout = () => {
     localStorage.removeItem("token");
@@ -85,23 +89,23 @@ export default function Sidebar() {
       {/* User Info */}
       <div className="relative z-10 mb-6 rounded-2xl border border-white/20 bg-white/10 p-4 backdrop-blur-md">
         <p className="text-xs text-green-100">Logged in as</p>
-        {/* suppressHydrationWarning tells React to ignore this node's mismatch */}
         <h3 className="mt-1 text-sm font-bold" suppressHydrationWarning>
-          {user.name || "EcoCity User"}
+          {mounted ? (user.name || "EcoCity User") : "EcoCity User"}
         </h3>
         <span
           className="mt-3 inline-flex rounded-full bg-green-200 px-3 py-1 text-xs font-bold capitalize text-[#1E3A8A]"
           suppressHydrationWarning
         >
-          {role}
+          {mounted ? role : DEFAULT_ROLE}
         </span>
       </div>
 
-      {/* Nav */}
+      {/* Nav — always render ALL items (server safe), hide non-role items after mount */}
       <nav className="relative z-10 flex-1 space-y-2">
-        {menus[role].map((item) => {
-          const Icon     = item.icon;
-          const isActive = pathname === item.path;
+        {ALL_ITEMS.map((item) => {
+          const Icon      = item.icon;
+          const isActive  = pathname === item.path;
+          const isVisible = !mounted || menus[role].some((m) => m.path === item.path);
           return (
             <Link
               key={item.path}
@@ -110,7 +114,7 @@ export default function Sidebar() {
                 isActive
                   ? "bg-white text-[#1E3A8A] shadow-lg"
                   : "text-white/90 hover:bg-white/20 hover:text-white"
-              }`}
+              } ${isVisible ? "" : "hidden"}`}
             >
               <Icon size={19} className={isActive ? "text-[#10B981]" : "text-green-100"} />
               {item.name}

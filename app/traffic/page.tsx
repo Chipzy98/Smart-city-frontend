@@ -1,30 +1,21 @@
 "use client";
 
-import { useEffect, useState, useCallback, type ChangeEvent } from "react";
-import dynamic from "next/dynamic";
+import { useEffect, useState, type ChangeEvent } from "react";
 import {
   Car, CloudSun, CalendarDays, Clock, Gauge,
-  Route, Loader2, MapPin, Navigation, History,
-  AlertTriangle, CheckCircle2, Minus, RefreshCw,
-  MousePointer2, Star, Wifi, WifiOff,
+  Route, Loader2, MapPin, Navigation, History, RefreshCw,
+  AlertTriangle, CheckCircle2, Minus,
+  MousePointer2, Star,
 } from "lucide-react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import {
   getLiveTrafficFromApiAsync,
-  getRealtimeTrafficFromApiAsync,
   predictTrafficFromApiAsync,
   analyseRouteFromApiAsync,
 } from "../api/smartCityApi";
-import type { LatLng, TrafficPoint, RealtimePoint, RouteOption } from "@/components/maps/TrafficMap";
-
-const TrafficMap = dynamic(() => import("@/components/maps/TrafficMap"), {
-  ssr: false,
-  loading: () => (
-    <div className="flex h-[380px] items-center justify-center rounded-3xl bg-slate-100 text-sm text-slate-400">
-      Loading map…
-    </div>
-  ),
-});
+import type { LatLng, RouteOption } from "@/components/maps/TrafficMap";
+import PlacesAutocomplete from "@/components/maps/PlacesAutocomplete";
+import GoogleTrafficMap from "@/components/maps/GoogleTrafficMap";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 type PageTab = "predict" | "route";
@@ -63,24 +54,6 @@ type RouteForm   = { originName: string; destinationName: string; weather: numbe
 const weatherOptions = ["Clear ☀️", "Cloudy ⛅", "Rainy 🌧️", "Stormy ⛈️"];
 const dayOptions     = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
 
-const SRI_LANKA_CITIES = [
-  { name: "Colombo",      lat: 6.9271, lng: 79.8612 },
-  { name: "Kandy",        lat: 7.2906, lng: 80.6337 },
-  { name: "Galle",        lat: 6.0535, lng: 80.2210 },
-  { name: "Jaffna",       lat: 9.6615, lng: 80.0255 },
-  { name: "Negombo",      lat: 7.2094, lng: 79.8358 },
-  { name: "Matara",       lat: 5.9549, lng: 80.5550 },
-  { name: "Trincomalee",  lat: 8.5874, lng: 81.2152 },
-  { name: "Anuradhapura", lat: 8.3114, lng: 80.4037 },
-  { name: "Batticaloa",   lat: 7.7170, lng: 81.6924 },
-  { name: "Ratnapura",    lat: 6.6828, lng: 80.3992 },
-  { name: "Colombo Fort", lat: 6.9344, lng: 79.8428 },
-  { name: "Kurunegala",   lat: 7.4867, lng: 80.3647 },
-  { name: "Badulla",      lat: 6.9934, lng: 81.0550 },
-  { name: "Nuwara Eliya", lat: 6.9497, lng: 80.7891 },
-  { name: "Hambantota",   lat: 6.1241, lng: 81.1185 },
-];
-
 // ── Helpers ────────────────────────────────────────────────────────────────
 const congestionColor = (l: number) =>
   l >= 75 ? "text-red-600" : l >= 40 ? "text-yellow-600" : "text-green-600";
@@ -99,14 +72,8 @@ const fmtTime = (m: number) =>
 export default function TrafficPage() {
   const [tab,     setTab]     = useState<PageTab>("predict");
   const [records, setRecords] = useState<TrafficRecord[]>([]);
-  const [picked,  setPicked]  = useState<LatLng | null>(null);
 
-  // ── Real-time TomTom state ─────────────────────────────────────────────
-  const [realtimePoints,   setRealtimePoints]   = useState<RealtimePoint[]>([]);
-  const [realtimeLoading,  setRealtimeLoading]  = useState(false);
-  const [realtimeError,    setRealtimeError]     = useState("");
-  const [realtimeLastFetch,setRealtimeLastFetch] = useState<Date | null>(null);
-  const [autoRefresh,      setAutoRefresh]       = useState(false);
+
 
   // Predict
   const [predResult,  setPredResult]  = useState<PredictResult | null>(null);
@@ -116,12 +83,11 @@ export default function TrafficPage() {
   });
 
   // Route
-  const [routeResult,   setRouteResult]   = useState<RouteResult | null>(null);
-  const [routeLoading,  setRouteLoading]  = useState(false);
-  const [routeForm,     setRouteForm]     = useState<RouteForm>({ originName: "", destinationName: "", weather: 0 });
-  const [originLatLng,  setOriginLatLng]  = useState<LatLng | null>(null);
-  const [destLatLng,    setDestLatLng]    = useState<LatLng | null>(null);
-  const [pickingFor,    setPickingFor]    = useState<"origin" | "dest" | null>(null);
+  const [routeResult,  setRouteResult]  = useState<RouteResult | null>(null);
+  const [routeLoading, setRouteLoading] = useState(false);
+  const [routeForm,    setRouteForm]    = useState<RouteForm>({ originName: "", destinationName: "", weather: 0 });
+  const [originLatLng, setOriginLatLng] = useState<LatLng | null>(null);
+  const [destLatLng,   setDestLatLng]   = useState<LatLng | null>(null);
   const [selectedRoute, setSelectedRoute] = useState<number | null>(null);
 
   // ── Load DB traffic records ────────────────────────────────────────────
@@ -135,73 +101,12 @@ export default function TrafficPage() {
     })();
   }, []);
 
-  // ── Fetch TomTom real-time data ────────────────────────────────────────
-  const fetchRealtime = useCallback(async () => {
-    setRealtimeLoading(true);
-    setRealtimeError("");
-    try {
-      const res = await getRealtimeTrafficFromApiAsync();
 
-      // res can be { success, count, data } or direct array
-      const points: RealtimePoint[] =
-        res?.data ? res.data :
-        Array.isArray(res) ? res : [];
-
-      setRealtimePoints(points);
-      setRealtimeLastFetch(new Date());
-    } catch (e) {
-      setRealtimeError("TomTom data fetch failed. Backend running ද?");
-      console.error("[realtime]", e);
-    } finally {
-      setRealtimeLoading(false);
-    }
-  }, []);
-
-  // Auto-refresh every 60s when enabled
-  useEffect(() => {
-    if (!autoRefresh) return;
-    const id = setInterval(fetchRealtime, 60_000);
-    return () => clearInterval(id);
-  }, [autoRefresh, fetchRealtime]);
-
-  // ── Map click ──────────────────────────────────────────────────────────
-  const handleMapClick = (latlng: LatLng) => {
-    if (tab === "predict") {
-      setPicked(latlng);
-      const now = new Date();
-      setPredForm((p) => ({ ...p, hour: now.getHours(), day: now.getDay() }));
-      return;
-    }
-    if (pickingFor === "origin") {
-      setOriginLatLng(latlng);
-      setRouteForm((p) => ({ ...p, originName: "Custom Location" }));
-      setPickingFor("dest");
-    } else if (pickingFor === "dest") {
-      setDestLatLng(latlng);
-      setRouteForm((p) => ({ ...p, destinationName: "Custom Location" }));
-      setPickingFor(null);
-    }
-  };
-
-  const cityByName = (n: string) => SRI_LANKA_CITIES.find((c) => c.name === n);
-
-  const handleOriginCity = (name: string) => {
-    setRouteForm((p) => ({ ...p, originName: name }));
-    const c = cityByName(name);
-    setOriginLatLng(c ? { lat: c.lat, lng: c.lng } : null);
-    setRouteResult(null);
-  };
-  const handleDestCity = (name: string) => {
-    setRouteForm((p) => ({ ...p, destinationName: name }));
-    const c = cityByName(name);
-    setDestLatLng(c ? { lat: c.lat, lng: c.lng } : null);
-    setRouteResult(null);
-  };
 
   const clearRoute = () => {
     setOriginLatLng(null); setDestLatLng(null);
     setRouteForm((p) => ({ ...p, originName: "", destinationName: "" }));
-    setPickingFor(null); setRouteResult(null); setSelectedRoute(null);
+    setRouteResult(null); setSelectedRoute(null);
   };
 
   const predict = async () => {
@@ -230,180 +135,13 @@ export default function TrafficPage() {
     finally { setRouteLoading(false); }
   };
 
-  const trafficPoints: TrafficPoint[] = records.map((r) => ({
-    lat: Number(r.latitude), lng: Number(r.longitude),
-    congestionLevel: Number(r.congestionLevel),
-  }));
-
-  const selectionMode =
-    tab === "route"
-      ? pickingFor === "origin" ? "origin"
-      : pickingFor === "dest"   ? "destination"
-      : null
-    : null;
-
-  const mapRoutes = tab === "route" ? (routeResult?.routes ?? []) : [];
-
   // ── Render ─────────────────────────────────────────────────────────────
   return (
     <DashboardLayout title="Traffic Management">
       <div className="space-y-6">
 
-        {/* ── MAP + REALTIME PANEL ── */}
-        <div className="relative overflow-hidden rounded-3xl border border-white/30 bg-white/20 p-5 shadow-2xl backdrop-blur-xl">
-
-          {/* Header */}
-          <div className="mb-4 flex flex-wrap items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600 to-green-500 text-white shadow-lg">
-              <MapPin size={20} />
-            </div>
-            <div>
-              <h2 className="text-lg font-bold text-slate-900">Live Traffic Map</h2>
-              <p className="text-xs text-slate-500">
-                {pickingFor === "origin" ? "🔵 Map click → Starting Point pick"
-                : pickingFor === "dest"  ? "🟢 Map click → Ending Point pick"
-                : "Map click → location pick"}
-              </p>
-            </div>
-
-            {/* TomTom Real-time controls */}
-            <div className="ml-auto flex flex-wrap items-center gap-2">
-
-              {/* Last fetch time */}
-              {realtimeLastFetch && (
-                <span className="text-xs text-slate-400">
-                  Updated: {realtimeLastFetch.toLocaleTimeString()}
-                </span>
-              )}
-
-              {/* Auto refresh toggle */}
-              <button type="button"
-                onClick={() => setAutoRefresh((v) => !v)}
-                className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold transition ${
-                  autoRefresh
-                    ? "bg-green-600 text-white shadow"
-                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-                }`}
-              >
-                {autoRefresh ? <Wifi size={13}/> : <WifiOff size={13}/>}
-                {autoRefresh ? "Auto ON" : "Auto OFF"}
-              </button>
-
-              {/* Manual fetch button */}
-              <button type="button"
-                onClick={fetchRealtime}
-                disabled={realtimeLoading}
-                className="flex items-center gap-1.5 rounded-xl bg-blue-600 px-3 py-2 text-xs font-bold text-white transition hover:bg-blue-700 disabled:opacity-60"
-              >
-                {realtimeLoading
-                  ? <Loader2 size={13} className="animate-spin"/>
-                  : <RefreshCw size={13}/>
-                }
-                {realtimeLoading ? "Fetching…" : "Fetch Live Data"}
-              </button>
-
-              {tab === "route" && (
-                <>
-                  <button type="button"
-                    onClick={() => setPickingFor(pickingFor === "origin" ? null : "origin")}
-                    className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold transition ${
-                      pickingFor === "origin" ? "bg-blue-600 text-white shadow" : "bg-blue-50 text-blue-700 hover:bg-blue-100"
-                    }`}
-                  >
-                    <MapPin size={13}/> {pickingFor === "origin" ? "Click Map…" : "Pick A"}
-                  </button>
-                  <button type="button"
-                    onClick={() => setPickingFor(pickingFor === "dest" ? null : "dest")}
-                    className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold transition ${
-                      pickingFor === "dest" ? "bg-green-600 text-white shadow" : "bg-green-50 text-green-700 hover:bg-green-100"
-                    }`}
-                  >
-                    <Navigation size={13}/> {pickingFor === "dest" ? "Click Map…" : "Pick B"}
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-
-          {/* Error banner */}
-          {realtimeError && (
-            <div className="mb-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-2.5 text-xs font-semibold text-red-700">
-              ⚠️ {realtimeError}
-            </div>
-          )}
-
-          {/* Real-time stats bar */}
-          {realtimePoints.length > 0 && (
-            <div className="mb-3 flex flex-wrap gap-2">
-              {realtimePoints.map((p) => (
-                <div key={`${p.latitude}-${p.longitude}`}
-                  className={`flex items-center gap-2 rounded-xl border px-3 py-1.5 text-xs font-semibold ${
-                    p.congestionLevel >= 75 ? "border-red-200 bg-red-50 text-red-700" :
-                    p.congestionLevel >= 40 ? "border-yellow-200 bg-yellow-50 text-yellow-700" :
-                    "border-green-200 bg-green-50 text-green-700"
-                  }`}
-                >
-                  <span className={`h-2 w-2 rounded-full ${
-                    p.congestionLevel >= 75 ? "bg-red-500" :
-                    p.congestionLevel >= 40 ? "bg-yellow-500" : "bg-green-500"
-                  }`}/>
-                  <span>{p.locationName}</span>
-                  <span className="font-bold">{p.currentSpeedKmh} km/h</span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Map */}
-          <TrafficMap
-            trafficPoints={trafficPoints}
-            realtimePoints={realtimePoints}
-            onLocationPick={handleMapClick}
-            selectionMode={selectionMode}
-            pickedLocation={tab === "predict" ? picked : null}
-            originLocation={tab === "route" ? originLatLng : null}
-            destLocation={tab === "route" ? destLatLng : null}
-            routes={mapRoutes}
-            selectedRoute={selectedRoute}
-            onRouteSelect={setSelectedRoute}
-            height="380px"
-          />
-
-          {/* A/B coordinate badges */}
-          {tab === "route" && (originLatLng || destLatLng) && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {originLatLng && (
-                <div className="flex items-center gap-2 rounded-xl bg-blue-100 px-3 py-2 text-xs font-bold text-blue-700">
-                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[10px] text-white">A</span>
-                  {originLatLng.lat.toFixed(4)}, {originLatLng.lng.toFixed(4)}
-                </div>
-              )}
-              {destLatLng && (
-                <div className="flex items-center gap-2 rounded-xl bg-green-100 px-3 py-2 text-xs font-bold text-green-700">
-                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-green-600 text-[10px] text-white">B</span>
-                  {destLatLng.lat.toFixed(4)}, {destLatLng.lng.toFixed(4)}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Legend */}
-          <div className="mt-3 flex flex-wrap gap-4 text-xs text-slate-400">
-            <span className="flex items-center gap-1"><span className="h-3 w-3 rounded-full bg-green-500 inline-block"/> Low</span>
-            <span className="flex items-center gap-1"><span className="h-3 w-3 rounded-full bg-yellow-500 inline-block"/> Moderate</span>
-            <span className="flex items-center gap-1"><span className="h-3 w-3 rounded-full bg-red-500 inline-block"/> High</span>
-            {realtimePoints.length > 0 && (
-              <span className="flex items-center gap-1 text-blue-500 font-semibold">
-                <Wifi size={11}/> TomTom Live ({realtimePoints.length} points)
-              </span>
-            )}
-            {tab === "route" && mapRoutes.length > 0 && (
-              <span className="flex items-center gap-1 ml-2">
-                <span className="h-1 w-6 rounded bg-indigo-500 inline-block"/> Selected route
-              </span>
-            )}
-          </div>
-        </div>
+        {/* ── MAP + LIVE TRAFFIC (self-contained) ── */}
+        <GoogleTrafficMap height="520px" />
 
         {/* ── TABS ── */}
         <div className="flex rounded-2xl border border-white/50 bg-white/30 p-1 shadow">
@@ -527,50 +265,40 @@ export default function TrafficPage() {
               </h2>
               <div className="mb-4 flex items-start gap-2 rounded-2xl border border-blue-200/60 bg-blue-50/60 px-4 py-3 text-xs text-slate-600">
                 <MousePointer2 size={15} className="mt-0.5 shrink-0 text-blue-600"/>
-                <span>City select <b>හෝ</b> map click → A/B pick. AI real Sri Lanka routes suggest කරනවා.</span>
+                <span>Google Places search → A/B pick. AI real Sri Lanka routes suggest කරනවා.</span>
               </div>
 
               <div className="space-y-4">
                 {/* Origin */}
                 <div>
-                  <label className="mb-1 flex items-center gap-2 text-sm font-semibold text-slate-700">
-                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white">A</span>
-                    Starting Point
-                  </label>
-                  <select value={SRI_LANKA_CITIES.some((c) => c.name === routeForm.originName) ? routeForm.originName : ""}
-                    onChange={(e) => handleOriginCity(e.target.value)}
-                    className="w-full rounded-2xl border border-white/50 bg-white/70 px-4 py-2.5 text-sm font-semibold text-slate-800 outline-none">
-                    <option value="">-- Select city --</option>
-                    {SRI_LANKA_CITIES.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
-                  </select>
+                  <PlacesAutocomplete
+                    label="Starting Point"
+                    badgeLetter="A"
+                    pinColor="blue"
+                    placeholder="Type a location in Sri Lanka…"
+                    value={routeForm.originName}
+                    onChange={(name, latlng) => {
+                      setRouteForm((p) => ({ ...p, originName: name }));
+                      setOriginLatLng(latlng);
+                    }}
+                  />
                   {originLatLng && <p className="mt-1 text-xs text-blue-600">📍 {originLatLng.lat.toFixed(5)}, {originLatLng.lng.toFixed(5)}</p>}
-                  <button type="button" onClick={() => setPickingFor("origin")}
-                    className={`mt-2 flex w-full items-center justify-center gap-2 rounded-xl py-2 text-xs font-bold transition ${
-                      pickingFor === "origin" ? "bg-blue-600 text-white" : "bg-blue-50 text-blue-700 hover:bg-blue-100"}`}>
-                    <MapPin size={13}/> {pickingFor === "origin" ? "Click on Map…" : "Pick from Map"}
-                  </button>
                 </div>
 
                 {/* Destination */}
                 <div>
-                  <label className="mb-1 flex items-center gap-2 text-sm font-semibold text-slate-700">
-                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-green-600 text-[10px] font-bold text-white">B</span>
-                    Ending Point
-                  </label>
-                  <select value={SRI_LANKA_CITIES.some((c) => c.name === routeForm.destinationName) ? routeForm.destinationName : ""}
-                    onChange={(e) => handleDestCity(e.target.value)}
-                    className="w-full rounded-2xl border border-white/50 bg-white/70 px-4 py-2.5 text-sm font-semibold text-slate-800 outline-none">
-                    <option value="">-- Select city --</option>
-                    {SRI_LANKA_CITIES.filter((c) => c.name !== routeForm.originName).map((c) => (
-                      <option key={c.name} value={c.name}>{c.name}</option>
-                    ))}
-                  </select>
+                  <PlacesAutocomplete
+                    label="Ending Point"
+                    badgeLetter="B"
+                    pinColor="green"
+                    placeholder="Type a destination in Sri Lanka…"
+                    value={routeForm.destinationName}
+                    onChange={(name, latlng) => {
+                      setRouteForm((p) => ({ ...p, destinationName: name }));
+                      setDestLatLng(latlng);
+                    }}
+                  />
                   {destLatLng && <p className="mt-1 text-xs text-green-600">🏁 {destLatLng.lat.toFixed(5)}, {destLatLng.lng.toFixed(5)}</p>}
-                  <button type="button" onClick={() => setPickingFor("dest")}
-                    className={`mt-2 flex w-full items-center justify-center gap-2 rounded-xl py-2 text-xs font-bold transition ${
-                      pickingFor === "dest" ? "bg-green-600 text-white" : "bg-green-50 text-green-700 hover:bg-green-100"}`}>
-                    <Navigation size={13}/> {pickingFor === "dest" ? "Click on Map…" : "Pick from Map"}
-                  </button>
                 </div>
 
                 {/* Weather */}
@@ -674,7 +402,6 @@ export default function TrafficPage() {
                       })}
                     </div>
                   ) : (
-                    /* Single result fallback */
                     <div className="rounded-3xl border border-slate-200 bg-white/70 p-6 shadow-xl">
                       <div className="mb-4 flex items-center gap-2">
                         <span className="font-bold text-slate-700">{routeResult.originName}</span>

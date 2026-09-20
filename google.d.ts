@@ -1,7 +1,3 @@
-// Auto-loaded by TypeScript via types/google-maps.d.ts
-// Declares the global `google` namespace so @types/google.maps works
-// whether the package is installed or not.
-
 declare namespace google {
   namespace maps {
     class Map {

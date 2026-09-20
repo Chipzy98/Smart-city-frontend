@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
 import Sidebar from "./Sidebar";
 import Navbar from "./Navbar";
+import { useLocalStorage } from "@/hooks/useLocalStorage";
 
 export default function DashboardLayout({
   children,
@@ -11,12 +11,18 @@ export default function DashboardLayout({
   children: React.ReactNode;
   title: string;
 }) {
-  const [darkMode] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
-
-    const saved = localStorage.getItem("theme");
-    return saved === "dark";
-  });
+  // ── FIX ──────────────────────────────────────────────────────────────────
+  // Original code read localStorage inside a useState initializer, which
+  // caused a hydration mismatch (server returns false, client returns real
+  // value) and can't be fixed with useEffect + setState without triggering
+  // the react-hooks/set-state-in-effect lint rule.
+  //
+  // useSyncExternalStore solves both: the server snapshot is always null
+  // (so SSR and hydration agree), and the client snapshot reads the live
+  // localStorage value immediately after hydration — no effect, no cascade.
+  // ─────────────────────────────────────────────────────────────────────────
+  const raw      = useLocalStorage("theme");
+  const darkMode = raw === "dark";
 
   return (
     <div

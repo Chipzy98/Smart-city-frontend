@@ -1,803 +1,478 @@
-// D:\Chipzy\ESOFT LEC\Final project\smart-city-frontend\smart-city-frontend\components\maps\GoogleTrafficMap.tsx
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import {
-  Loader2,
-  RefreshCw,
-  Wifi,
-  WifiOff,
-  Navigation,
-  MapPin,
-  X,
-  Route,
+  Loader2, RefreshCw, Wifi, WifiOff,
+  Navigation, MapPin, X, Route,
 } from "lucide-react";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
+
 export type RealtimePoint = {
-  locationName: string;
-  latitude: number;
-  longitude: number;
-  currentSpeedKmh: number;
+  locationName:     string;
+  latitude:         number;
+  longitude:        number;
+  currentSpeedKmh:  number;
   freeFlowSpeedKmh: number;
-  congestionLevel: number;
+  congestionLevel:  number;
   congestionStatus: string;
 };
 
-type LngLat = { lng: number; lat: number };
+type LatLng   = { lat: number; lng: number };
+type RouteInfo = { distanceKm: number; durationMin: number };
 
-type RouteInfo = {
-  distanceKm: number;
-  durationMin: number;
-  geometry: GeoJSON.LineString;
-};
+interface Props { height?: string; }
 
-interface Props {
-  height?: string;
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
 
-const TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
+const GOOGLE_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
+const TOMTOM     = process.env.NEXT_PUBLIC_TOMTOM_TOKEN ?? "";
 
-const SL_CENTER: [number, number] = [80.7718, 7.8731];
+const SL_CENTER = { lat: 7.8731, lng: 80.7718 };
+const SL_ZOOM   = 8;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
 function congestionColor(level: number) {
   if (level >= 75) return "#ef4444";
   if (level >= 40) return "#f59e0b";
   return "#22c55e";
 }
-
 function congestionLabel(level: number) {
   if (level >= 75) return "Heavy";
   if (level >= 40) return "Moderate";
   return "Light";
 }
 
-// Singleton Mapbox loader
-let mbReady = false;
-let mbCbs: (() => void)[] = [];
+// ─────────────────────────────────────────────────────────────────────────────
+// Google Maps singleton loader
+// State on `window` so Next.js HMR reloads don't reset it.
+// ─────────────────────────────────────────────────────────────────────────────
 
-function ensureMapbox(cb: () => void) {
-  if (mbReady) {
-    cb();
-    return;
+declare global {
+  interface Window {
+    // `google` is already typed as `typeof google` by @types/google.maps.
+    // Redeclaring it as `any` causes TS2717. Only declare our own additions.
+    __gmCbs:    (() => void)[];
+    __gmLoaded: boolean;
   }
+}
 
-  mbCbs.push(cb);
+function ensureGoogle(cb: () => void) {
+  if (typeof window === "undefined") return;
 
-  if (document.querySelector("script[data-mapbox]")) return;
+  // Already loaded
+  if (window.__gmLoaded && window.google?.maps) { cb(); return; }
 
-  const link = document.createElement("link");
-  link.rel = "stylesheet";
-  link.href =
-    "https://api.mapbox.com/mapbox-gl-js/v3.4.0/mapbox-gl.css";
-  document.head.appendChild(link);
+  if (!window.__gmCbs) window.__gmCbs = [];
+  window.__gmCbs.push(cb);
 
-  const s = document.createElement("script");
-  s.setAttribute("data-mapbox", "1");
-  s.src = "https://api.mapbox.com/mapbox-gl-js/v3.4.0/mapbox-gl.js";
+  // Script already injected — wait
+  if (document.querySelector("script[data-google-maps]")) return;
 
-  s.onload = () => {
-    mbReady = true;
-    mbCbs.forEach((f) => f());
-    mbCbs = [];
+  // Callback name Google will call when ready
+  (window as unknown as Record<string, unknown>).__gmInit = () => {
+    window.__gmLoaded = true;
+    (window.__gmCbs ?? []).forEach((f) => f());
+    window.__gmCbs = [];
   };
 
+  const s = document.createElement("script");
+  s.setAttribute("data-google-maps", "1");
+  s.src =
+    `https://maps.googleapis.com/maps/api/js` +
+    `?key=${GOOGLE_KEY}` +
+    `&libraries=places,geometry` +
+    `&callback=__gmInit` +
+    `&loading=async`;
+  s.async = true;
+  s.defer = true;
   document.head.appendChild(s);
 }
 
-// Mapbox Directions API
-async function getRoute(
-  origin: LngLat,
-  dest: LngLat
-): Promise<RouteInfo | null> {
-  try {
-    const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${origin.lng},${origin.lat};${dest.lng},${dest.lat}?geometries=geojson&overview=full&access_token=${TOKEN}`;
+// ─────────────────────────────────────────────────────────────────────────────
+// Component
+// ─────────────────────────────────────────────────────────────────────────────
 
-    const res = await fetch(url);
-    const data = await res.json();
-
-    if (!data.routes?.length) return null;
-
-    const r = data.routes[0];
-
-    return {
-      distanceKm: Math.round(r.distance / 100) / 10,
-      durationMin: Math.round(r.duration / 60),
-      geometry: r.geometry,
-    };
-  } catch {
-    return null;
-  }
-}
-
-// Geocode a place name
-async function geocode(query: string): Promise<LngLat | null> {
-  try {
-    const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(
-      query
-    )}.json?country=lk&limit=1&access_token=${TOKEN}`;
-
-    const res = await fetch(url);
-    const data = await res.json();
-
-    if (!data.features?.length) return null;
-
-    const [lng, lat] = data.features[0].center;
-
-    return { lng, lat };
-  } catch {
-    return null;
-  }
-}
-
-export default function GoogleTrafficMap({
-  height = "560px",
-}: Props) {
-  const containerRef = useRef<HTMLDivElement>(null);
-
+export default function GoogleTrafficMap({ height = "560px" }: Props) {
+  const containerRef      = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const mapRef = useRef<any>(null);
-
+  const mapRef            = useRef<any>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const markersRef = useRef<any[]>([]);
-
+  const trafficLayerRef   = useRef<any>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const originMarkerRef = useRef<any>(null);
-
+  const directionsRendRef = useRef<any>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const destMarkerRef = useRef<any>(null);
+  const directionsServRef = useRef<any>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const markersRef        = useRef<any[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const originMarkerRef   = useRef<any>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const destMarkerRef     = useRef<any>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const infoWindowRef     = useRef<any>(null);
+  const mountedRef          = useRef(true);
+  const originACRef         = useRef<HTMLInputElement>(null);
+  const destACRef           = useRef<HTMLInputElement>(null);
 
-  const mountedRef = useRef(true);
-
-  const [mapReady, setMapReady] = useState(false);
-  const [mapError, setMapError] = useState("");
-  const [points, setPoints] = useState<RealtimePoint[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [fetchError, setFetchError] = useState("");
-  const [lastFetch, setLastFetch] = useState<Date | null>(null);
-  const [autoRefresh, setAutoRefresh] = useState(false);
-  const [selected, setSelected] =
-    useState<RealtimePoint | null>(null);
-  const [trafficLayer, setTrafficLayer] = useState(true);
-
-  // Route state
-  const [originInput, setOriginInput] = useState("");
-  const [destInput, setDestInput] = useState("");
-  const [origin, setOrigin] = useState<LngLat | null>(null);
-  const [dest, setDest] = useState<LngLat | null>(null);
-  const [routeInfo, setRouteInfo] =
-    useState<RouteInfo | null>(null);
+  // GOOGLE_KEY is a build-time constant (process.env inlined by Next.js).
+  // Deriving the initial error from it here means we never need to call
+  // setMapError inside a useEffect, which satisfies react-hooks/set-state-in-effect.
+  const [mapReady,  setMapReady]  = useState(false);
+  const [mapError,  setMapError]  = useState<string>(
+    () => GOOGLE_KEY ? "" : "NEXT_PUBLIC_GOOGLE_MAPS_API_KEY is missing in .env.local"
+  );
+  const [points,       setPoints]       = useState<RealtimePoint[]>([]);
+  const [loading,      setLoading]      = useState(false);
+  const [fetchError,   setFetchError]   = useState("");
+  const [lastFetch,    setLastFetch]    = useState<Date | null>(null);
+  const [autoRefresh,  setAutoRefresh]  = useState(false);
+  const [selected,     setSelected]     = useState<RealtimePoint | null>(null);
+  const [trafficOn,    setTrafficOn]    = useState(true);
+  const [showPanel,    setShowPanel]    = useState(true);
+  const [originInput,  setOriginInput]  = useState("");
+  const [destInput,    setDestInput]    = useState("");
+  const [origin,       setOrigin]       = useState<LatLng | null>(null);
+  const [dest,         setDest]         = useState<LatLng | null>(null);
+  const [routeInfo,    setRouteInfo]    = useState<RouteInfo | null>(null);
   const [routeLoading, setRouteLoading] = useState(false);
-  const [routeError, setRouteError] = useState("");
-  const [pickMode, setPickMode] =
-    useState<"origin" | "dest" | null>(null);
-  const [showPanel, setShowPanel] = useState(true);
+  const [routeError,   setRouteError]   = useState("");
+  const [pickMode,     setPickMode]     = useState<"origin" | "dest" | null>(null);
 
-  // Init map
+  // ── Map init ─────────────────────────────────────────────────────────────
   useEffect(() => {
     mountedRef.current = true;
 
-    ensureMapbox(() => {
-      if (
-        !mountedRef.current ||
-        !containerRef.current ||
-        mapRef.current
-      )
-        return;
+    // mapError is already set in the useState initializer if key is missing.
+    // Skip map init entirely when there's no key.
+    if (!GOOGLE_KEY) return;
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const mapboxgl = (window as any).mapboxgl;
+    ensureGoogle(() => {
+      if (!mountedRef.current || !containerRef.current || mapRef.current) return;
 
-      mapboxgl.accessToken = TOKEN;
+      const G = window.google.maps;
 
-      mapRef.current = new mapboxgl.Map({
-        container: containerRef.current,
-        style: "mapbox://styles/mapbox/streets-v12",
-        center: SL_CENTER,
-        zoom: 7.5,
-      });
-
-      mapRef.current.on("load", () => {
-        if (!mountedRef.current) return;
-
-        const TOMTOM = process.env.NEXT_PUBLIC_TOMTOM_TOKEN || "";
-
-        mapRef.current.addSource("tomtom-traffic", {
-          type: "raster",
-          tiles: [
-            `https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{z}/{x}/{y}.png?key=${TOMTOM}`,
+      try {
+        // ── Real Google Map ──────────────────────────────────────────────
+        const map = new G.Map(containerRef.current, {
+          center:            SL_CENTER,
+          zoom:              SL_ZOOM,
+          mapTypeId:         G.MapTypeId.ROADMAP,
+          disableDefaultUI:  false,
+          zoomControl:       true,
+          mapTypeControl:    false,
+          streetViewControl: false,
+          fullscreenControl: false,
+          styles: [
+            // Subtle style — keeps road colors but reduces POI clutter
+            { featureType: "poi",               elementType: "labels", stylers: [{ visibility: "off" }] },
+            { featureType: "transit.station",   elementType: "labels", stylers: [{ visibility: "off" }] },
           ],
-          tileSize: 256,
-          minzoom: 0,
-          maxzoom: 22,
         });
+        mapRef.current = map;
 
-        mapRef.current.addLayer({
-          id: "tomtom-traffic-layer",
-          type: "raster",
-          source: "tomtom-traffic",
+        // ── Google TrafficLayer — exact same as Google Maps traffic ──────
+        const trafficLayer = new G.TrafficLayer();
+        trafficLayer.setMap(map);
+        trafficLayerRef.current = trafficLayer;
 
-          /*
-           * Higher opacity makes the road traffic colors
-           * much closer to the Google Maps traffic appearance.
-           */
-          paint: {
-            "raster-opacity": 0.95,
-            "raster-fade-duration": 0,
-            "raster-resampling": "linear",
-          },
-        });
-
-        // Route source
-        mapRef.current.addSource("route", {
-          type: "geojson",
-          data: {
-            type: "Feature",
-            geometry: {
-              type: "LineString",
-              coordinates: [],
-            },
-            properties: {},
+        // ── Directions ───────────────────────────────────────────────────
+        directionsServRef.current = new G.DirectionsService();
+        directionsRendRef.current = new G.DirectionsRenderer({
+          map,
+          suppressMarkers:      true,  // we use custom A/B markers
+          polylineOptions: {
+            strokeColor:   "#2563eb",
+            strokeWeight:  6,
+            strokeOpacity: 0.9,
           },
         });
 
-        // Route white casing
-        mapRef.current.addLayer({
-          id: "route-casing",
-          type: "line",
-          source: "route",
-          layout: {
-            "line-join": "round",
-            "line-cap": "round",
-          },
-          paint: {
-            "line-color": "#ffffff",
-            "line-width": 10,
-            "line-opacity": 0.85,
-          },
-        });
+        // ── Shared InfoWindow ────────────────────────────────────────────
+        infoWindowRef.current = new G.InfoWindow();
 
-        // Route blue line
-        mapRef.current.addLayer({
-          id: "route-line",
-          type: "line",
-          source: "route",
-          layout: {
-            "line-join": "round",
-            "line-cap": "round",
-          },
-          paint: {
-            "line-color": "#2563eb",
-            "line-width": 6,
-            "line-opacity": 0.90,
-          },
-        });
-
-        /*
-         * Make sure traffic layer is below the route.
-         * This keeps the A -> B route visible while the
-         * surrounding roads show their actual traffic colors.
-         */
-        if (
-          mapRef.current.getLayer("tomtom-traffic-layer") &&
-          mapRef.current.getLayer("route-casing")
-        ) {
-          mapRef.current.moveLayer(
-            "tomtom-traffic-layer",
-            "route-casing"
-          );
-        }
-
-        setMapReady(true);
-      });
-
-      // Click to pick location
-      mapRef.current.on(
-        "click",
-        (e: {
-          lngLat: {
-            lng: number;
-            lat: number;
-          };
-        }) => {
+        // ── Map click — pick origin / dest ───────────────────────────────
+        // Use google.maps.event.addListener — avoids TS2339 on typed Map ref
+        G.event.addListener(map, "click", (e: { latLng: { lat(): number; lng(): number } }) => {
           if (!mountedRef.current) return;
-
-          const lngLat = {
-            lng: e.lngLat.lng,
-            lat: e.lngLat.lat,
-          };
-
+          const latlng = { lat: e.latLng.lat(), lng: e.latLng.lng() };
           setPickMode((mode) => {
             if (mode === "origin") {
-              setOrigin(lngLat);
-              setOriginInput(
-                `${lngLat.lat.toFixed(4)}, ${lngLat.lng.toFixed(
-                  4
-                )}`
-              );
+              setOrigin(latlng);
+              setOriginInput(`${latlng.lat.toFixed(5)}, ${latlng.lng.toFixed(5)}`);
               return "dest";
             }
-
             if (mode === "dest") {
-              setDest(lngLat);
-              setDestInput(
-                `${lngLat.lat.toFixed(4)}, ${lngLat.lng.toFixed(
-                  4
-                )}`
-              );
+              setDest(latlng);
+              setDestInput(`${latlng.lat.toFixed(5)}, ${latlng.lng.toFixed(5)}`);
               return null;
             }
-
             return mode;
           });
-        }
-      );
+        });
+
+        setMapReady(true);
+      } catch (err) {
+        setMapError(`Map failed to load: ${err instanceof Error ? err.message : String(err)}`);
+      }
     });
 
     return () => {
       mountedRef.current = false;
-
-      markersRef.current.forEach((m) => m.remove());
+      // Google Maps doesn't need explicit destroy — just clear refs
+      markersRef.current.forEach((m) => { try { m.setMap(null); } catch { /**/ } });
       markersRef.current = [];
-
-      originMarkerRef.current?.remove();
-      destMarkerRef.current?.remove();
-
-      if (mapRef.current) {
-        mapRef.current.remove();
-        mapRef.current = null;
-      }
+      try { originMarkerRef.current?.setMap(null); } catch { /**/ }
+      try { destMarkerRef.current?.setMap(null);   } catch { /**/ }
+      originMarkerRef.current = null;
+      destMarkerRef.current   = null;
+      mapRef.current          = null;
     };
   }, []);
 
-  // Toggle TomTom traffic tile layer
+  // ── Places Autocomplete ───────────────────────────────────────────────────
   useEffect(() => {
-    if (!mapReady || !mapRef.current) return;
+    if (!mapReady) return;
+    const G = window.google.maps.places;
 
-    const visibility = trafficLayer
-      ? "visible"
-      : "none";
+    const setupAC = (
+      input: HTMLInputElement | null,
+      onPlace: (latlng: LatLng, addr: string) => void
+    ) => {
+      if (!input) return;
+      const ac = new G.Autocomplete(input, { componentRestrictions: { country: "lk" } });
+      ac.addListener("place_changed", () => {
+        const place = ac.getPlace();
+        if (!place?.geometry?.location) return;
+        const latlng = { lat: place.geometry.location.lat(), lng: place.geometry.location.lng() };
+        onPlace(latlng, place.formatted_address ?? input.value);
+      });
+    };
 
-    if (
-      mapRef.current.getLayer(
-        "tomtom-traffic-layer"
-      )
-    ) {
-      mapRef.current.setLayoutProperty(
-        "tomtom-traffic-layer",
-        "visibility",
-        visibility
-      );
-    }
-  }, [trafficLayer, mapReady]);
+    setupAC(originACRef.current, (latlng, addr) => {
+      setOrigin(latlng);
+      setOriginInput(addr);
+      mapRef.current?.panTo(latlng);
+      mapRef.current?.setZoom(12);
+    });
 
-  // Update cursor when pick mode changes
+    setupAC(destACRef.current, (latlng, addr) => {
+      setDest(latlng);
+      setDestInput(addr);
+      mapRef.current?.panTo(latlng);
+      mapRef.current?.setZoom(12);
+    });
+  }, [mapReady]);
+
+  // ── Traffic layer toggle ──────────────────────────────────────────────────
+  useEffect(() => {
+    if (!mapReady || !trafficLayerRef.current) return;
+    trafficLayerRef.current.setMap(trafficOn ? mapRef.current : null);
+  }, [trafficOn, mapReady]);
+
+  // ── Cursor ────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!mapRef.current) return;
-
-    mapRef.current.getCanvas().style.cursor =
-      pickMode ? "crosshair" : "";
+    mapRef.current.setOptions({ draggableCursor: pickMode ? "crosshair" : "" });
   }, [pickMode]);
 
-  // Draw origin/dest markers
+  // ── A/B custom markers ────────────────────────────────────────────────────
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
+    const G = window.google.maps;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const mapboxgl = (window as any).mapboxgl;
+    const makePinSVG = (letter: string, color: string) =>
+      `data:image/svg+xml;charset=utf-8,` + encodeURIComponent(`
+        <svg xmlns="http://www.w3.org/2000/svg" width="36" height="44" viewBox="0 0 36 44">
+          <path d="M18 0C8 0 0 8 0 18c0 12 18 26 18 26S36 30 36 18C36 8 28 0 18 0z" fill="${color}"/>
+          <circle cx="18" cy="18" r="10" fill="white"/>
+          <text x="18" y="23" text-anchor="middle" font-family="sans-serif" font-size="13" font-weight="900" fill="${color}">${letter}</text>
+        </svg>`);
 
-    originMarkerRef.current?.remove();
-
+    try { originMarkerRef.current?.setMap(null); } catch { /**/ }
     if (origin) {
-      const el = document.createElement("div");
-
-      el.style.cssText =
-        "width:36px;height:36px;border-radius:50% 50% 50% 0;background:#2563eb;border:3px solid #fff;box-shadow:0 3px 10px rgba(0,0,0,0.3);transform:rotate(-45deg);display:flex;align-items:center;justify-content:center;";
-
-      el.innerHTML =
-        `<span style="transform:rotate(45deg);color:#fff;font-weight:900;font-size:13px">A</span>`;
-
-      originMarkerRef.current =
-        new mapboxgl.Marker({
-          element: el,
-          anchor: "bottom",
-        })
-          .setLngLat([
-            origin.lng,
-            origin.lat,
-          ])
-          .addTo(mapRef.current);
+      originMarkerRef.current = new G.Marker({
+        position: origin, map: mapRef.current,
+        icon: makePinSVG("A", "#2563eb"),
+        title: "Starting Point",
+        zIndex: 100,
+      });
     }
 
-    destMarkerRef.current?.remove();
-
+    try { destMarkerRef.current?.setMap(null); } catch { /**/ }
     if (dest) {
-      const el = document.createElement("div");
-
-      el.style.cssText =
-        "width:36px;height:36px;border-radius:50% 50% 50% 0;background:#16a34a;border:3px solid #fff;box-shadow:0 3px 10px rgba(0,0,0,0.3);transform:rotate(-45deg);display:flex;align-items:center;justify-content:center;";
-
-      el.innerHTML =
-        `<span style="transform:rotate(45deg);color:#fff;font-weight:900;font-size:13px">B</span>`;
-
-      destMarkerRef.current =
-        new mapboxgl.Marker({
-          element: el,
-          anchor: "bottom",
-        })
-          .setLngLat([
-            dest.lng,
-            dest.lat,
-          ])
-          .addTo(mapRef.current);
+      destMarkerRef.current = new G.Marker({
+        position: dest, map: mapRef.current,
+        icon: makePinSVG("B", "#16a34a"),
+        title: "Destination",
+        zIndex: 100,
+      });
     }
-
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [origin, dest, mapReady]);
 
-  // Draw route when both points set
+  // ── Route via Google Directions API ──────────────────────────────────────
   const drawRoute = useCallback(async () => {
-    if (
-      !origin ||
-      !dest ||
-      !mapReady ||
-      !mapRef.current
-    )
-      return;
+    if (!origin || !dest || !mapReady) return;
+    const G = window.google.maps;
 
     setRouteLoading(true);
     setRouteError("");
 
-    const info = await getRoute(origin, dest);
+    if (!directionsServRef.current || !directionsRendRef.current) return;
+    directionsServRef.current.route(
+      {
+        origin:      new G.LatLng(origin.lat, origin.lng),
+        destination: new G.LatLng(dest.lat, dest.lng),
+        travelMode:  G.TravelMode.DRIVING,
+        drivingOptions: {
+          departureTime: new Date(),
+          trafficModel:  G.TrafficModel.BEST_GUESS,
+        },
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (result: any, status: any) => {
+        if (!mountedRef.current) return;
+        setRouteLoading(false);
 
-    if (!mountedRef.current) return;
+        if (status !== "OK") {
+          setRouteError(`Route not found: ${status}`);
+          return;
+        }
 
-    setRouteLoading(false);
+        directionsRendRef.current?.setDirections(result);
 
-    if (!info) {
-      setRouteError(
-        "Route not found. Try different locations."
-      );
-      return;
-    }
-
-    setRouteInfo(info);
-
-    mapRef.current
-      .getSource("route")
-      ?.setData({
-        type: "Feature",
-        geometry: info.geometry,
-        properties: {},
-      });
-
-    // Fit map to route
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const mapboxgl = (window as any).mapboxgl;
-
-    const coords =
-      info.geometry.coordinates as [
-        number,
-        number
-      ][];
-
-    const bounds = coords.reduce(
-      (b, c) =>
-        b.extend(
-          c as [number, number]
-        ),
-      new mapboxgl.LngLatBounds(
-        coords[0],
-        coords[0]
-      )
+        const leg = result.routes[0].legs[0];
+        setRouteInfo({
+          distanceKm: Math.round(leg.distance.value / 100) / 10,
+          durationMin: Math.round(leg.duration_in_traffic
+            ? leg.duration_in_traffic.value / 60
+            : leg.duration.value / 60),
+        });
+      }
     );
-
-    mapRef.current.fitBounds(bounds, {
-      padding: 80,
-      maxZoom: 14,
-    });
   }, [origin, dest, mapReady]);
 
   useEffect(() => {
     if (!origin || !dest) return;
-
-    const id = setTimeout(() => {
-      drawRoute();
-    }, 0);
-
+    const id = setTimeout(() => { drawRoute(); }, 0);
     return () => clearTimeout(id);
-
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [origin, dest]);
 
+  // ── Clear route ───────────────────────────────────────────────────────────
   const clearRoute = () => {
-    setOrigin(null);
-    setDest(null);
-
-    setOriginInput("");
-    setDestInput("");
-
-    setRouteInfo(null);
-    setRouteError("");
-    setPickMode(null);
-
-    originMarkerRef.current?.remove();
-    originMarkerRef.current = null;
-
-    destMarkerRef.current?.remove();
-    destMarkerRef.current = null;
-
-    mapRef.current
-      ?.getSource("route")
-      ?.setData({
-        type: "Feature",
-        geometry: {
-          type: "LineString",
-          coordinates: [],
-        },
-        properties: {},
-      });
-
-    mapRef.current?.flyTo({
-      center: SL_CENTER,
-      zoom: 7.5,
-    });
+    setOrigin(null); setDest(null);
+    setOriginInput(""); setDestInput("");
+    setRouteInfo(null); setRouteError(""); setPickMode(null);
+    try { originMarkerRef.current?.setMap(null); } catch { /**/ } originMarkerRef.current = null;
+    try { destMarkerRef.current?.setMap(null);   } catch { /**/ } destMarkerRef.current   = null;
+    directionsRendRef.current?.setDirections({ routes: [] });
+    mapRef.current?.panTo(SL_CENTER);
+    mapRef.current?.setZoom(SL_ZOOM);
   };
 
-  const handleSearch = async (
-    type: "origin" | "dest"
-  ) => {
-    const q =
-      type === "origin"
-        ? originInput
-        : destInput;
-
-    if (!q.trim()) return;
-
-    const lngLat = await geocode(q);
-
-    if (!lngLat) {
-      setRouteError(
-        `"${q}" location not found.`
-      );
-      return;
-    }
-
-    if (type === "origin") {
-      setOrigin(lngLat);
-
-      mapRef.current?.flyTo({
-        center: [
-          lngLat.lng,
-          lngLat.lat,
-        ],
-        zoom: 11,
-      });
-    } else {
-      setDest(lngLat);
-
-      mapRef.current?.flyTo({
-        center: [
-          lngLat.lng,
-          lngLat.lat,
-        ],
-        zoom: 11,
-      });
-    }
-  };
-
-  // TomTom fetch
+  // ── TomTom data fetch ─────────────────────────────────────────────────────
   const fetchData = async () => {
-    setLoading(true);
-    setFetchError("");
-
+    setLoading(true); setFetchError("");
     try {
-      const token =
-        typeof window !== "undefined"
-          ? localStorage.getItem("token") ?? ""
-          : "";
-
-      const res = await fetch(
-        "/api/smartcity/traffic/realtime",
-        {
-          headers: {
-            Authorization: token
-              ? `Bearer ${token}`
-              : "",
-          },
-        }
-      );
-
-      const json = await res.json();
-
-      const data: RealtimePoint[] =
-        json?.data
-          ? json.data
-          : Array.isArray(json)
-          ? json
-          : [];
-
-      if (data.length === 0) {
-        setFetchError(
-          "No traffic data. Backend running ද?"
-        );
-      }
-
-      setPoints(data);
-      setLastFetch(new Date());
-    } catch {
-      setFetchError(
-        "TomTom fetch failed. Backend running ද?"
-      );
-    } finally {
-      setLoading(false);
-    }
+      const token = typeof window !== "undefined" ? localStorage.getItem("token") ?? "" : "";
+      const res   = await fetch("/api/smartcity/traffic/realtime", {
+        headers: { Authorization: token ? `Bearer ${token}` : "" },
+      });
+      const json  = await res.json();
+      const data: RealtimePoint[] = json?.data ? json.data : Array.isArray(json) ? json : [];
+      if (data.length === 0) setFetchError("No traffic data. Backend running ද?");
+      setPoints(data); setLastFetch(new Date());
+    } catch { setFetchError("TomTom fetch failed. Backend running ද?"); }
+    finally  { setLoading(false); }
   };
 
   useEffect(() => {
     if (!autoRefresh) return;
-
-    const id = setInterval(
-      fetchData,
-      60_000
-    );
-
+    const id = setInterval(fetchData, 60_000);
     return () => clearInterval(id);
-
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoRefresh]);
 
-  // TomTom markers
+  // ── TomTom point markers on Google Map ───────────────────────────────────
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
+    const G = window.google.maps;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const mapboxgl = (window as any).mapboxgl;
-
-    markersRef.current.forEach((m) =>
-      m.remove()
-    );
-
+    markersRef.current.forEach((m) => { try { m.setMap(null); } catch { /**/ } });
     markersRef.current = [];
 
     points.forEach((p) => {
-      const color = congestionColor(
-        p.congestionLevel
-      );
+      const color = congestionColor(p.congestionLevel);
 
-      const el =
-        document.createElement("div");
+      // Custom circle marker via SVG
+      const svgIcon = `data:image/svg+xml;charset=utf-8,` + encodeURIComponent(`
+        <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+          <circle cx="24" cy="24" r="21" fill="${color}" stroke="white" stroke-width="3"/>
+          <text x="24" y="21" text-anchor="middle" font-family="sans-serif" font-size="13" font-weight="800" fill="white">${p.currentSpeedKmh}</text>
+          <text x="24" y="33" text-anchor="middle" font-family="sans-serif" font-size="9" font-weight="600" fill="white" opacity="0.9">km/h</text>
+        </svg>`);
 
-      el.style.cssText = `
-        width:44px;
-        height:44px;
-        border-radius:50%;
-        background:${color};
-        border:3px solid #fff;
-        box-shadow:0 3px 10px rgba(0,0,0,0.25);
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        flex-direction:column;
-        color:#fff;
-        font-size:11px;
-        font-weight:800;
-        cursor:pointer;
-        line-height:1.1;
-        text-align:center;
-        transition:transform .15s;
-      `;
+      const marker = new G.Marker({
+        position: { lat: p.latitude, lng: p.longitude },
+        map:      mapRef.current,
+        icon: svgIcon,
+        title:  p.locationName,
+        zIndex: 50,
+      });
 
-      el.innerHTML = `
-        ${p.currentSpeedKmh}
-        <div style="font-size:8px;font-weight:600;opacity:.9">
-          km/h
-        </div>
-      `;
-
-      el.onmouseenter = () => {
-        el.style.transform =
-          "scale(1.15)";
-      };
-
-      el.onmouseleave = () => {
-        el.style.transform =
-          "scale(1)";
-      };
-
-      el.onclick = () =>
-        setSelected((prev) =>
-          prev?.locationName ===
-          p.locationName
-            ? null
-            : p
-        );
-
-      const popup =
-        new mapboxgl.Popup({
-          offset: 28,
-        }).setHTML(`
-          <div style="min-width:150px;font-family:sans-serif;padding:4px">
-            <b style="color:${color};font-size:13px">
-              🚗 ${p.locationName}
-            </b>
-
-            <hr style="margin:5px 0;border-color:#eee"/>
-
-            <div style="font-size:12px;line-height:1.8">
-              ⚡ Current:
-              <b>${p.currentSpeedKmh} km/h</b>
-              <br/>
-
-              🏎️ Free flow:
-              <b>${p.freeFlowSpeedKmh} km/h</b>
-              <br/>
-
-              🚦
-              <b style="color:${color}">
-                ${p.congestionStatus}
-              </b>
+      G.event.addListener(marker, "click", () => {
+        setSelected((prev) => prev?.locationName === p.locationName ? null : p);
+        infoWindowRef.current?.setContent(`
+          <div style="min-width:170px;font-family:sans-serif;padding:6px">
+            <b style="color:${color};font-size:13px">🚗 ${p.locationName}</b>
+            <hr style="margin:6px 0;border-color:#eee"/>
+            <div style="font-size:12px;line-height:1.9">
+              ⚡ Current: <b>${p.currentSpeedKmh} km/h</b><br/>
+              🏎️ Free flow: <b>${p.freeFlowSpeedKmh} km/h</b><br/>
+              🚦 <b style="color:${color}">${p.congestionStatus}</b>
             </div>
           </div>
         `);
+        infoWindowRef.current?.open(mapRef.current, marker);
+      });
 
-      markersRef.current.push(
-        new mapboxgl.Marker({
-          element: el,
-        })
-          .setLngLat([
-            p.longitude,
-            p.latitude,
-          ])
-          .setPopup(popup)
-          .addTo(mapRef.current)
-      );
+      markersRef.current.push(marker);
     });
-
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [points, mapReady]);
 
-  // Avg congestion on route corridor
-  const avgCongestion =
-    points.length > 0
-      ? Math.round(
-          points.reduce(
-            (s, p) =>
-              s + p.congestionLevel,
-            0
-          ) / points.length
-        )
-      : null;
+  const avgCongestion = points.length > 0
+    ? Math.round(points.reduce((s, p) => s + p.congestionLevel, 0) / points.length)
+    : null;
 
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div
-      className="relative w-full overflow-hidden rounded-3xl shadow-lg"
-      style={{ height }}
-    >
-      <div
-        ref={containerRef}
-        className="h-full w-full"
-      />
+    <div className="relative w-full overflow-hidden rounded-3xl shadow-lg" style={{ height }}>
+      {/* Google Map container */}
+      <div ref={containerRef} className="h-full w-full" />
 
       {/* Loading */}
       {!mapReady && !mapError && (
         <div className="absolute inset-0 flex items-center justify-center rounded-3xl bg-slate-100">
           <div className="flex flex-col items-center gap-2">
-            <Loader2
-              size={28}
-              className="animate-spin text-blue-500"
-            />
-            <p className="text-sm font-semibold text-slate-400">
-              Loading map…
-            </p>
+            <Loader2 size={28} className="animate-spin text-blue-500" />
+            <p className="text-sm font-semibold text-slate-400">Loading Google Maps…</p>
           </div>
         </div>
       )}
 
       {mapError && (
-        <div className="absolute inset-0 flex items-center justify-center rounded-3xl bg-red-50">
-          <p className="text-sm font-semibold text-red-600">
-            ⚠️ {mapError}
-          </p>
+        <div className="absolute inset-0 flex items-center justify-center rounded-3xl bg-red-50 p-6">
+          <p className="text-sm font-semibold text-red-600 text-center">⚠️ {mapError}</p>
         </div>
       )}
 
@@ -806,94 +481,31 @@ export default function GoogleTrafficMap({
           {/* TOP BAR */}
           <div className="absolute left-3 right-3 top-3 z-[1000] flex flex-wrap items-center gap-2">
             <div className="flex items-center gap-2 rounded-2xl bg-white/90 px-3 py-2 shadow backdrop-blur-sm">
-              <span className="text-sm font-bold text-slate-800">
-                🗺️ Live Traffic Map
-              </span>
-
-              {lastFetch && (
-                <span className="text-xs text-slate-400">
-                  {lastFetch.toLocaleTimeString()}
-                </span>
-              )}
+              <span className="text-sm font-bold text-slate-800">🗺️ Live Traffic Map</span>
+              {lastFetch && <span className="text-xs text-slate-400">{lastFetch.toLocaleTimeString()}</span>}
             </div>
 
-            <div className="ml-auto flex gap-2">
-              <button
-                type="button"
-                onClick={() =>
-                  setTrafficLayer(
-                    (v) => !v
-                  )
-                }
-                className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold shadow transition ${
-                  trafficLayer
-                    ? "bg-red-500 text-white"
-                    : "bg-white/90 text-slate-600 hover:bg-white"
-                }`}
-              >
-                🚦{" "}
-                {trafficLayer
-                  ? "Traffic ON"
-                  : "Traffic OFF"}
+            <div className="ml-auto flex flex-wrap gap-2">
+              <button type="button" onClick={() => setTrafficOn((v) => !v)}
+                className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold shadow transition ${trafficOn ? "bg-red-500 text-white" : "bg-white/90 text-slate-600 hover:bg-white"}`}>
+                🚦 {trafficOn ? "Traffic ON" : "Traffic OFF"}
               </button>
 
-              <button
-                type="button"
-                onClick={() =>
-                  setShowPanel(
-                    (v) => !v
-                  )
-                }
-                className="flex items-center gap-1.5 rounded-xl bg-white/90 px-3 py-2 text-xs font-bold text-slate-700 shadow hover:bg-white transition"
-              >
-                <Route size={13} />{" "}
-                {showPanel
-                  ? "Hide"
-                  : "Route"}
+              <button type="button" onClick={() => setShowPanel((v) => !v)}
+                className="flex items-center gap-1.5 rounded-xl bg-white/90 px-3 py-2 text-xs font-bold text-slate-700 shadow hover:bg-white transition">
+                <Route size={13} /> {showPanel ? "Hide" : "Route"}
               </button>
 
-              <button
-                type="button"
-                onClick={() =>
-                  setAutoRefresh(
-                    (v) => !v
-                  )
-                }
-                className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold shadow transition ${
-                  autoRefresh
-                    ? "bg-green-600 text-white"
-                    : "bg-white/90 text-slate-600 hover:bg-white"
-                }`}
-              >
-                {autoRefresh ? (
-                  <Wifi size={13} />
-                ) : (
-                  <WifiOff size={13} />
-                )}
-
-                {autoRefresh
-                  ? "Auto ON"
-                  : "Auto OFF"}
+              <button type="button" onClick={() => setAutoRefresh((v) => !v)}
+                className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold shadow transition ${autoRefresh ? "bg-green-600 text-white" : "bg-white/90 text-slate-600 hover:bg-white"}`}>
+                {autoRefresh ? <Wifi size={13} /> : <WifiOff size={13} />}
+                {autoRefresh ? "Auto ON" : "Auto OFF"}
               </button>
 
-              <button
-                type="button"
-                onClick={fetchData}
-                disabled={loading}
-                className="flex items-center gap-1.5 rounded-xl bg-blue-600 px-3 py-2 text-xs font-bold text-white shadow hover:bg-blue-700 disabled:opacity-60 transition"
-              >
-                {loading ? (
-                  <Loader2
-                    size={13}
-                    className="animate-spin"
-                  />
-                ) : (
-                  <RefreshCw size={13} />
-                )}
-
-                {loading
-                  ? "Fetching…"
-                  : "Live Traffic"}
+              <button type="button" onClick={fetchData} disabled={loading}
+                className="flex items-center gap-1.5 rounded-xl bg-blue-600 px-3 py-2 text-xs font-bold text-white shadow hover:bg-blue-700 disabled:opacity-60 transition">
+                {loading ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                {loading ? "Fetching…" : "Live Traffic"}
               </button>
             </div>
           </div>
@@ -903,267 +515,100 @@ export default function GoogleTrafficMap({
             <div className="absolute left-3 top-16 z-[1000] w-72 rounded-3xl border border-white/60 bg-white/95 p-4 shadow-2xl backdrop-blur-sm">
               <div className="mb-3 flex items-center justify-between">
                 <h3 className="flex items-center gap-2 font-bold text-slate-800 text-sm">
-                  <Navigation
-                    size={15}
-                    className="text-blue-600"
-                  />
-                  Route Planner
+                  <Navigation size={15} className="text-blue-600" /> Route Planner
                 </h3>
-
                 {(origin || dest) && (
-                  <button
-                    type="button"
-                    onClick={clearRoute}
-                    className="rounded-xl bg-slate-100 px-2 py-1 text-[11px] font-bold text-slate-500 hover:bg-slate-200"
-                  >
-                    Clear
-                  </button>
+                  <button type="button" onClick={clearRoute}
+                    className="rounded-xl bg-slate-100 px-2 py-1 text-[11px] font-bold text-slate-500 hover:bg-slate-200">Clear</button>
                 )}
               </div>
 
               {pickMode && (
-                <div
-                  className={`mb-3 rounded-2xl px-3 py-2 text-xs font-semibold ${
-                    pickMode === "origin"
-                      ? "bg-blue-50 text-blue-700"
-                      : "bg-green-50 text-green-700"
-                  }`}
-                >
-                  {pickMode ===
-                  "origin"
-                    ? "🔵 Click map to set Start (A)"
-                    : "🟢 Click map to set End (B)"}
+                <div className={`mb-3 rounded-2xl px-3 py-2 text-xs font-semibold ${pickMode === "origin" ? "bg-blue-50 text-blue-700" : "bg-green-50 text-green-700"}`}>
+                  {pickMode === "origin" ? "🔵 Click map to set Start (A)" : "🟢 Click map to set End (B)"}
                 </div>
               )}
 
-              {/* Origin */}
+              {/* Origin — Google Places Autocomplete */}
               <div className="mb-2">
                 <label className="mb-1 flex items-center gap-1.5 text-xs font-bold text-slate-600">
-                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white">
-                    A
-                  </span>
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white">A</span>
                   Starting Point
                 </label>
-
                 <div className="flex gap-1">
-                  <input
-                    type="text"
-                    value={originInput}
-                    onChange={(e) =>
-                      setOriginInput(
-                        e.target.value
-                      )
-                    }
-                    onKeyDown={(e) =>
-                      e.key ===
-                        "Enter" &&
-                      handleSearch(
-                        "origin"
-                      )
-                    }
+                  <input ref={originACRef} type="text" value={originInput}
+                    onChange={(e) => setOriginInput(e.target.value)}
                     placeholder="Search or click map…"
-                    className="flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700 outline-none focus:border-blue-400"
-                  />
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleSearch(
-                        "origin"
-                      )
-                    }
-                    className="rounded-xl bg-blue-600 px-2.5 text-white hover:bg-blue-700"
-                  >
+                    className="flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700 outline-none focus:border-blue-400" />
+                  <button type="button"
+                    onClick={() => setPickMode((m) => m === "origin" ? null : "origin")}
+                    className={`rounded-xl px-2.5 text-xs font-bold transition ${pickMode === "origin" ? "bg-blue-600 text-white" : "bg-blue-50 text-blue-700 hover:bg-blue-100"}`}>
                     <MapPin size={13} />
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setPickMode(
-                        (m) =>
-                          m ===
-                          "origin"
-                            ? null
-                            : "origin"
-                      )
-                    }
-                    className={`rounded-xl px-2.5 text-xs font-bold transition ${
-                      pickMode ===
-                      "origin"
-                        ? "bg-blue-600 text-white"
-                        : "bg-blue-50 text-blue-700 hover:bg-blue-100"
-                    }`}
-                  >
-                    Pin
                   </button>
                 </div>
               </div>
 
-              {/* Destination */}
+              {/* Destination — Google Places Autocomplete */}
               <div className="mb-3">
                 <label className="mb-1 flex items-center gap-1.5 text-xs font-bold text-slate-600">
-                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-green-600 text-[10px] font-bold text-white">
-                    B
-                  </span>
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-green-600 text-[10px] font-bold text-white">B</span>
                   Destination
                 </label>
-
                 <div className="flex gap-1">
-                  <input
-                    type="text"
-                    value={destInput}
-                    onChange={(e) =>
-                      setDestInput(
-                        e.target.value
-                      )
-                    }
-                    onKeyDown={(e) =>
-                      e.key ===
-                        "Enter" &&
-                      handleSearch(
-                        "dest"
-                      )
-                    }
+                  <input ref={destACRef} type="text" value={destInput}
+                    onChange={(e) => setDestInput(e.target.value)}
                     placeholder="Search or click map…"
-                    className="flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700 outline-none focus:border-green-400"
-                  />
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleSearch(
-                        "dest"
-                      )
-                    }
-                    className="rounded-xl bg-green-600 px-2.5 text-white hover:bg-green-700"
-                  >
+                    className="flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700 outline-none focus:border-green-400" />
+                  <button type="button"
+                    onClick={() => setPickMode((m) => m === "dest" ? null : "dest")}
+                    className={`rounded-xl px-2.5 text-xs font-bold transition ${pickMode === "dest" ? "bg-green-600 text-white" : "bg-green-50 text-green-700 hover:bg-green-100"}`}>
                     <MapPin size={13} />
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setPickMode(
-                        (m) =>
-                          m ===
-                          "dest"
-                            ? null
-                            : "dest"
-                      )
-                    }
-                    className={`rounded-xl px-2.5 text-xs font-bold transition ${
-                      pickMode ===
-                      "dest"
-                        ? "bg-green-600 text-white"
-                        : "bg-green-50 text-green-700 hover:bg-green-100"
-                    }`}
-                  >
-                    Pin
                   </button>
                 </div>
               </div>
 
-              {routeError && (
-                <p className="mb-2 rounded-xl bg-red-50 px-3 py-2 text-xs font-semibold text-red-600">
-                  {routeError}
-                </p>
-              )}
+              {routeError && <p className="mb-2 rounded-xl bg-red-50 px-3 py-2 text-xs font-semibold text-red-600">{routeError}</p>}
 
               {routeLoading && (
                 <div className="flex items-center gap-2 rounded-2xl bg-blue-50 px-3 py-2.5 text-xs font-semibold text-blue-700">
-                  <Loader2
-                    size={13}
-                    className="animate-spin"
-                  />
-                  Finding best route…
+                  <Loader2 size={13} className="animate-spin" /> Finding best route…
                 </div>
               )}
 
-              {routeInfo &&
-                !routeLoading && (
-                  <div className="rounded-2xl bg-gradient-to-br from-blue-50 to-green-50 p-3 border border-blue-100">
-                    <div className="grid grid-cols-3 gap-2 mb-2">
-                      <div className="rounded-xl bg-white p-2 text-center shadow-sm">
-                        <p className="text-[10px] text-slate-400">
-                          Distance
-                        </p>
-
-                        <p className="text-sm font-extrabold text-blue-700">
-                          {
-                            routeInfo.distanceKm
-                          }{" "}
-                          km
-                        </p>
-                      </div>
-
-                      <div className="rounded-xl bg-white p-2 text-center shadow-sm">
-                        <p className="text-[10px] text-slate-400">
-                          Est. Time
-                        </p>
-
-                        <p className="text-sm font-extrabold text-purple-700">
-                          {routeInfo.durationMin >=
-                          60
-                            ? `${Math.floor(
-                                routeInfo.durationMin /
-                                  60
-                              )}h ${
-                                routeInfo.durationMin %
-                                60
-                              }m`
-                            : `${routeInfo.durationMin}m`}
-                        </p>
-                      </div>
-
-                      <div className="rounded-xl bg-white p-2 text-center shadow-sm">
-                        <p className="text-[10px] text-slate-400">
-                          Traffic
-                        </p>
-
-                        <p
-                          className="text-sm font-extrabold"
-                          style={{
-                            color:
-                              congestionColor(
-                                avgCongestion ??
-                                  0
-                              ),
-                          }}
-                        >
-                          {avgCongestion !==
-                          null
-                            ? congestionLabel(
-                                avgCongestion
-                              )
-                            : "–"}
-                        </p>
-                      </div>
+              {routeInfo && !routeLoading && (
+                <div className="rounded-2xl bg-gradient-to-br from-blue-50 to-green-50 p-3 border border-blue-100">
+                  <div className="grid grid-cols-3 gap-2 mb-2">
+                    <div className="rounded-xl bg-white p-2 text-center shadow-sm">
+                      <p className="text-[10px] text-slate-400">Distance</p>
+                      <p className="text-sm font-extrabold text-blue-700">{routeInfo.distanceKm} km</p>
                     </div>
-
-                    {avgCongestion !==
-                      null && (
-                      <div className="h-1.5 overflow-hidden rounded-full bg-slate-200">
-                        <div
-                          className="h-full rounded-full transition-all duration-700"
-                          style={{
-                            width: `${avgCongestion}%`,
-                            background:
-                              congestionColor(
-                                avgCongestion
-                              ),
-                          }}
-                        />
-                      </div>
-                    )}
+                    <div className="rounded-xl bg-white p-2 text-center shadow-sm">
+                      <p className="text-[10px] text-slate-400">Est. Time</p>
+                      <p className="text-sm font-extrabold text-purple-700">
+                        {routeInfo.durationMin >= 60
+                          ? `${Math.floor(routeInfo.durationMin / 60)}h ${routeInfo.durationMin % 60}m`
+                          : `${routeInfo.durationMin}m`}
+                      </p>
+                    </div>
+                    <div className="rounded-xl bg-white p-2 text-center shadow-sm">
+                      <p className="text-[10px] text-slate-400">Traffic</p>
+                      <p className="text-sm font-extrabold" style={{ color: congestionColor(avgCongestion ?? 0) }}>
+                        {avgCongestion !== null ? congestionLabel(avgCongestion) : "–"}
+                      </p>
+                    </div>
                   </div>
-                )}
+                  {avgCongestion !== null && (
+                    <div className="h-1.5 overflow-hidden rounded-full bg-slate-200">
+                      <div className="h-full rounded-full transition-all duration-700"
+                        style={{ width: `${avgCongestion}%`, background: congestionColor(avgCongestion) }} />
+                    </div>
+                  )}
+                </div>
+              )}
 
               {!origin && !dest && (
                 <p className="text-center text-[11px] text-slate-400 mt-2">
-                  Search locations above or
-                  click <b>Pin</b> then click on
-                  the map
+                  Search with Google Places above or click <b>📍</b> then click on map
                 </p>
               )}
             </div>
@@ -1172,91 +617,21 @@ export default function GoogleTrafficMap({
           {/* SELECTED POINT CARD */}
           {selected && (
             <div className="absolute right-3 top-16 z-[1000] w-52 rounded-3xl border border-white/60 bg-white/95 p-4 shadow-xl backdrop-blur-sm">
-              <button
-                type="button"
-                onClick={() =>
-                  setSelected(null)
-                }
-                className="absolute right-3 top-3 text-slate-400 hover:text-slate-600"
-              >
-                <X size={14} />
-              </button>
-
-              <p className="text-xs text-slate-400 mb-1">
-                TomTom Live
-              </p>
-
-              <p className="font-bold text-slate-800 text-sm mb-3">
-                🚗{" "}
-                {selected.locationName}
-              </p>
-
+              <button type="button" onClick={() => { setSelected(null); infoWindowRef.current?.close(); }}
+                className="absolute right-3 top-3 text-slate-400 hover:text-slate-600"><X size={14} /></button>
+              <p className="text-xs text-slate-400 mb-1">TomTom Live</p>
+              <p className="font-bold text-slate-800 text-sm mb-3">🚗 {selected.locationName}</p>
               <div className="space-y-1.5 text-xs">
+                <div className="flex justify-between"><span className="text-slate-500">⚡ Current</span><span className="font-bold">{selected.currentSpeedKmh} km/h</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">🏎️ Free flow</span><span className="font-bold">{selected.freeFlowSpeedKmh} km/h</span></div>
                 <div className="flex justify-between">
-                  <span className="text-slate-500">
-                    ⚡ Current
-                  </span>
-
-                  <span className="font-bold">
-                    {
-                      selected.currentSpeedKmh
-                    }{" "}
-                    km/h
-                  </span>
+                  <span className="text-slate-500">🚦 Status</span>
+                  <span className="font-bold" style={{ color: congestionColor(selected.congestionLevel) }}>{selected.congestionStatus}</span>
                 </div>
-
-                <div className="flex justify-between">
-                  <span className="text-slate-500">
-                    🏎️ Free flow
-                  </span>
-
-                  <span className="font-bold">
-                    {
-                      selected.freeFlowSpeedKmh
-                    }{" "}
-                    km/h
-                  </span>
-                </div>
-
-                <div className="flex justify-between">
-                  <span className="text-slate-500">
-                    🚦 Status
-                  </span>
-
-                  <span
-                    className="font-bold"
-                    style={{
-                      color:
-                        congestionColor(
-                          selected.congestionLevel
-                        ),
-                    }}
-                  >
-                    {
-                      selected.congestionStatus
-                    }
-                  </span>
-                </div>
-
                 <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
-                  <div
-                    className="h-full rounded-full"
-                    style={{
-                      width: `${selected.congestionLevel}%`,
-                      background:
-                        congestionColor(
-                          selected.congestionLevel
-                        ),
-                    }}
-                  />
+                  <div className="h-full rounded-full" style={{ width: `${selected.congestionLevel}%`, background: congestionColor(selected.congestionLevel) }} />
                 </div>
-
-                <p className="text-center text-[10px] text-slate-400">
-                  {selected.congestionLevel.toFixed(
-                    0
-                  )}
-                  % congestion
-                </p>
+                <p className="text-center text-[10px] text-slate-400">{selected.congestionLevel.toFixed(0)}% congestion</p>
               </div>
             </div>
           )}
@@ -1266,62 +641,19 @@ export default function GoogleTrafficMap({
             <div className="absolute bottom-3 left-3 right-3 z-[1000]">
               <div className="flex gap-2 overflow-x-auto pb-1">
                 {points.map((p) => {
-                  const color =
-                    congestionColor(
-                      p.congestionLevel
-                    );
-
-                  const isSel =
-                    selected?.locationName ===
-                    p.locationName;
-
+                  const color = congestionColor(p.congestionLevel);
+                  const isSel = selected?.locationName === p.locationName;
                   return (
-                    <button
-                      key={p.locationName}
-                      type="button"
-                      onClick={() =>
-                        setSelected(
-                          (prev) =>
-                            prev?.locationName ===
-                            p.locationName
-                              ? null
-                              : p
-                        )
-                      }
-                      className={`shrink-0 rounded-2xl border px-3 py-2 text-left shadow transition ${
-                        isSel
-                          ? "border-blue-400 bg-white scale-[1.03]"
-                          : "border-white/60 bg-white/90 hover:bg-white"
-                      }`}
-                      style={{
-                        minWidth: "110px",
-                      }}
-                    >
+                    <button key={p.locationName} type="button"
+                      onClick={() => setSelected((prev) => prev?.locationName === p.locationName ? null : p)}
+                      className={`shrink-0 rounded-2xl border px-3 py-2 text-left shadow transition ${isSel ? "border-blue-400 bg-white scale-[1.03]" : "border-white/60 bg-white/90 hover:bg-white"}`}
+                      style={{ minWidth: "110px" }}>
                       <div className="flex items-center gap-1.5 mb-0.5">
-                        <span
-                          className="h-2 w-2 rounded-full shrink-0"
-                          style={{
-                            background: color,
-                          }}
-                        />
-
-                        <p className="text-[11px] font-bold text-slate-700 truncate max-w-[80px]">
-                          {p.locationName}
-                        </p>
+                        <span className="h-2 w-2 rounded-full shrink-0" style={{ background: color }} />
+                        <p className="text-[11px] font-bold text-slate-700 truncate max-w-[80px]">{p.locationName}</p>
                       </div>
-
-                      <p
-                        className="text-sm font-extrabold"
-                        style={{
-                          color,
-                        }}
-                      >
-                        {
-                          p.currentSpeedKmh
-                        }{" "}
-                        <span className="text-[10px] font-semibold text-slate-400">
-                          km/h
-                        </span>
+                      <p className="text-sm font-extrabold" style={{ color }}>
+                        {p.currentSpeedKmh} <span className="text-[10px] font-semibold text-slate-400">km/h</span>
                       </p>
                     </button>
                   );
@@ -1330,45 +662,14 @@ export default function GoogleTrafficMap({
             </div>
           )}
 
-          {/* LEGEND */}
-          <div className="absolute bottom-3 right-3 z-[1000] flex flex-col gap-1 rounded-2xl bg-white/90 px-3 py-2 shadow">
-            <p className="text-[10px] font-bold text-slate-500 mb-0.5">
-              Traffic
-            </p>
-
-            {[
-              ["#22c55e", "Low"],
-              ["#f59e0b", "Moderate"],
-              ["#ef4444", "High"],
-            ].map(([c, l]) => (
-              <div
-                key={l}
-                className="flex items-center gap-1.5"
-              >
-                <span
-                  className="h-2.5 w-2.5 rounded-full"
-                  style={{
-                    background: c,
-                  }}
-                />
-
-                <span className="text-[10px] text-slate-600">
-                  {l}
-                </span>
-              </div>
-            ))}
-          </div>
-
-          {/* Pick mode overlay hint */}
+          {/* PICK HINT */}
           {pickMode && (
             <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-[1000] rounded-2xl bg-slate-900/80 px-4 py-2 text-xs font-bold text-white shadow backdrop-blur-sm">
-              {pickMode === "origin"
-                ? "🔵 Click map → Start Point (A)"
-                : "🟢 Click map → End Point (B)"}
+              {pickMode === "origin" ? "🔵 Click map → Start Point (A)" : "🟢 Click map → End Point (B)"}
             </div>
           )}
 
-          {/* Fetch error */}
+          {/* FETCH ERROR */}
           {fetchError && (
             <div className="absolute left-3 right-3 top-16 z-[1000] rounded-2xl border border-red-200 bg-red-50/95 px-4 py-2 text-xs font-semibold text-red-700 shadow">
               ⚠️ {fetchError}

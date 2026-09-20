@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -13,6 +12,7 @@ import {
   Brain,
   type LucideIcon,
 } from "lucide-react";
+import { useLocalStorage } from "@/hooks/useLocalStorage";
 
 type Role = "admin" | "manager" | "user";
 
@@ -29,72 +29,62 @@ type MenuItem = {
 
 const menus: Record<Role, MenuItem[]> = {
   admin: [
-    { name: "Dashboard", path: "/dashboard", icon: LayoutDashboard },
-    { name: "Traffic", path: "/traffic", icon: Map },
-    { name: "Waste", path: "/waste", icon: Trash2 },
-    { name: "Energy", path: "/energy", icon: Zap },
+    { name: "Dashboard",   path: "/dashboard",   icon: LayoutDashboard },
+    { name: "Traffic",     path: "/traffic",     icon: Map },
+    { name: "Waste",       path: "/waste",       icon: Trash2 },
+    { name: "Energy",      path: "/energy",      icon: Zap },
     { name: "AI Training", path: "/ai-training", icon: Brain },
   ],
-
   manager: [
-    { name: "Dashboard", path: "/dashboard", icon: LayoutDashboard },
-    { name: "Traffic", path: "/traffic", icon: Map },
-    { name: "Waste", path: "/waste", icon: Trash2 },
-    { name: "Energy", path: "/energy", icon: Zap },
+    { name: "Dashboard",   path: "/dashboard",   icon: LayoutDashboard },
+    { name: "Traffic",     path: "/traffic",     icon: Map },
+    { name: "Waste",       path: "/waste",       icon: Trash2 },
+    { name: "Energy",      path: "/energy",      icon: Zap },
     { name: "AI Training", path: "/ai-training", icon: Brain },
   ],
-
   user: [
     { name: "Dashboard", path: "/dashboard", icon: LayoutDashboard },
-    { name: "Traffic", path: "/traffic", icon: Map },
-    { name: "Waste", path: "/waste", icon: Trash2 },
-    { name: "Energy", path: "/energy", icon: Zap },
+    { name: "Traffic",   path: "/traffic",   icon: Map },
+    { name: "Waste",     path: "/waste",     icon: Trash2 },
+    { name: "Energy",    path: "/energy",    icon: Zap },
   ],
 };
 
-// All items rendered server-side
+// All nav items — rendered on server-side with admin set
 const ALL_ITEMS = menus.admin;
 
-// Default role used during server rendering
+// Fallback role used when localStorage returns null (SSR / unauthenticated)
 const DEFAULT_ROLE: Role = "admin";
+const DEFAULT_NAME = "EcoCity User";
 
-function getStoredUser(): User {
-  if (typeof window === "undefined") {
-    return {
-      role: DEFAULT_ROLE,
-      name: "",
-    };
-  }
-
+function parseUser(raw: string | null): User {
+  if (!raw) return { role: DEFAULT_ROLE, name: "" };
   try {
-    const storedUser = localStorage.getItem("user");
-
-    if (!storedUser) {
-      return {
-        role: DEFAULT_ROLE,
-        name: "",
-      };
-    }
-
-    return JSON.parse(storedUser) as User;
+    return JSON.parse(raw) as User;
   } catch {
-    return {
-      role: DEFAULT_ROLE,
-      name: "",
-    };
+    return { role: DEFAULT_ROLE, name: "" };
   }
 }
 
 export default function Sidebar() {
-  const router = useRouter();
+  const router   = useRouter();
   const pathname = usePathname();
 
-  const [user] = useState<User>(() => getStoredUser());
+  // ── FIX ──────────────────────────────────────────────────────────────────
+  // useSyncExternalStore is the React-sanctioned way to read external state
+  // (localStorage, DOM APIs, etc.) without a useEffect + setState cascade.
+  //
+  // • getServerSnapshot → always returns null during SSR & hydration
+  //   so the server HTML is stable and predictable.
+  // • getSnapshot → reads live localStorage on the client after hydration.
+  // • No useEffect, no setState inside an effect → no ESLint warning,
+  //   no cascading re-renders.
+  // ─────────────────────────────────────────────────────────────────────────
+  const raw  = useLocalStorage("user");
+  const user = parseUser(raw);
 
   const role: Role =
-    user.role === "admin" ||
-    user.role === "manager" ||
-    user.role === "user"
+    user.role === "admin" || user.role === "manager" || user.role === "user"
       ? user.role
       : DEFAULT_ROLE;
 
@@ -114,12 +104,9 @@ export default function Sidebar() {
         <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white text-[#1E3A8A] shadow-md">
           <Leaf size={24} />
         </div>
-
         <div>
           <h2 className="text-2xl font-extrabold leading-none">EcoCity</h2>
-          <p className="mt-1 text-xs text-green-100">
-            Smart Sustainability
-          </p>
+          <p className="mt-1 text-xs text-green-100">Smart Sustainability</p>
         </div>
       </div>
 
@@ -127,11 +114,20 @@ export default function Sidebar() {
       <div className="relative z-10 mb-6 rounded-2xl border border-white/20 bg-white/10 p-4 backdrop-blur-md">
         <p className="text-xs text-green-100">Logged in as</p>
 
-        <h3 className="mt-1 text-sm font-bold">
-          {user.name || "EcoCity User"}
+        {/*
+          suppressHydrationWarning is the correct prop for nodes whose
+          content is intentionally different between SSR (null snapshot)
+          and the first client paint (real localStorage value).
+          React skips the mismatch warning for this node only.
+        */}
+        <h3 className="mt-1 text-sm font-bold" suppressHydrationWarning>
+          {user.name || DEFAULT_NAME}
         </h3>
 
-        <span className="mt-3 inline-flex rounded-full bg-green-200 px-3 py-1 text-xs font-bold capitalize text-[#1E3A8A]">
+        <span
+          className="mt-3 inline-flex rounded-full bg-green-200 px-3 py-1 text-xs font-bold capitalize text-[#1E3A8A]"
+          suppressHydrationWarning
+        >
           {role}
         </span>
       </div>
@@ -140,16 +136,10 @@ export default function Sidebar() {
       <nav className="relative z-10 flex-1 space-y-2">
         {ALL_ITEMS.map((item) => {
           const Icon = item.icon;
+          const isActive  = pathname === item.path;
+          const isVisible = menus[role].some((m) => m.path === item.path);
 
-          const isActive = pathname === item.path;
-
-          const isVisible = menus[role].some(
-            (menuItem) => menuItem.path === item.path
-          );
-
-          if (!isVisible) {
-            return null;
-          }
+          if (!isVisible) return null;
 
           return (
             <Link
@@ -163,11 +153,8 @@ export default function Sidebar() {
             >
               <Icon
                 size={19}
-                className={
-                  isActive ? "text-[#10B981]" : "text-green-100"
-                }
+                className={isActive ? "text-[#10B981]" : "text-green-100"}
               />
-
               {item.name}
             </Link>
           );

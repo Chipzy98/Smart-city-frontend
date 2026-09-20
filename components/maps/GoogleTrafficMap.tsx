@@ -20,8 +20,8 @@ export type RealtimePoint = {
   congestionStatus: string;
 };
 
-type LatLng   = { lat: number; lng: number };
-type RouteInfo = { distanceKm: number; durationMin: number };
+type LngLat   = { lng: number; lat: number };
+type RouteInfo = { distanceKm: number; durationMin: number; geometry: GeoJSON.LineString };
 
 interface Props { height?: string; }
 
@@ -29,11 +29,13 @@ interface Props { height?: string; }
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-const GOOGLE_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
-const TOMTOM     = process.env.NEXT_PUBLIC_TOMTOM_TOKEN ?? "";
+const TOMTOM    = process.env.NEXT_PUBLIC_TOMTOM_TOKEN ?? "";
+const SL_CENTER: [number, number] = [80.7718, 7.8731];
 
-const SL_CENTER = { lat: 7.8731, lng: 80.7718 };
-const SL_ZOOM   = 8;
+// OpenFreeMap Liberty — Google Maps-like style, 100% free, no token needed
+const MAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
+
+const ML_VERSION = "4.7.1";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -51,49 +53,87 @@ function congestionLabel(level: number) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Google Maps singleton loader
+// MapLibre singleton loader
 // State on `window` so Next.js HMR reloads don't reset it.
 // ─────────────────────────────────────────────────────────────────────────────
 
 declare global {
   interface Window {
-    // `google` is already typed as `typeof google` by @types/google.maps.
-    // Redeclaring it as `any` causes TS2717. Only declare our own additions.
-    __gmCbs:    (() => void)[];
-    __gmLoaded: boolean;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    maplibregl: any;
+    __mlCbs: (() => void)[];
   }
 }
 
-function ensureGoogle(cb: () => void) {
+function ensureMapLibre(cb: () => void) {
   if (typeof window === "undefined") return;
 
-  // Already loaded
-  if (window.__gmLoaded && window.google?.maps) { cb(); return; }
+  if (window.maplibregl) { cb(); return; }
 
-  if (!window.__gmCbs) window.__gmCbs = [];
-  window.__gmCbs.push(cb);
+  if (!window.__mlCbs) window.__mlCbs = [];
+  window.__mlCbs.push(cb);
 
-  // Script already injected — wait
-  if (document.querySelector("script[data-google-maps]")) return;
+  if (document.querySelector("script[data-maplibre]")) return;
 
-  // Callback name Google will call when ready
-  (window as unknown as Record<string, unknown>).__gmInit = () => {
-    window.__gmLoaded = true;
-    (window.__gmCbs ?? []).forEach((f) => f());
-    window.__gmCbs = [];
-  };
+  if (!document.querySelector("link[data-maplibre-css]")) {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.setAttribute("data-maplibre-css", "1");
+    link.href = `https://unpkg.com/maplibre-gl@${ML_VERSION}/dist/maplibre-gl.css`;
+    document.head.appendChild(link);
+  }
 
   const s = document.createElement("script");
-  s.setAttribute("data-google-maps", "1");
-  s.src =
-    `https://maps.googleapis.com/maps/api/js` +
-    `?key=${GOOGLE_KEY}` +
-    `&libraries=places,geometry` +
-    `&callback=__gmInit` +
-    `&loading=async`;
-  s.async = true;
-  s.defer = true;
+  s.setAttribute("data-maplibre", "1");
+  s.src = `https://unpkg.com/maplibre-gl@${ML_VERSION}/dist/maplibre-gl.js`;
+  s.onload = () => {
+    (window.__mlCbs ?? []).forEach((f) => f());
+    window.__mlCbs = [];
+  };
   document.head.appendChild(s);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Routing — OSRM (free, no key)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function getRoute(origin: LngLat, dest: LngLat): Promise<RouteInfo | null> {
+  try {
+    const url =
+      `https://router.project-osrm.org/route/v1/driving/` +
+      `${origin.lng},${origin.lat};${dest.lng},${dest.lat}` +
+      `?overview=full&geometries=geojson`;
+    const res  = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.code !== "Ok" || !data.routes?.length) return null;
+    const r = data.routes[0];
+    return {
+      distanceKm:  Math.round(r.distance / 100) / 10,
+      durationMin: Math.round(r.duration / 60),
+      geometry:    r.geometry as GeoJSON.LineString,
+    };
+  } catch { return null; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Geocoding — Nominatim (free, no key)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function geocode(query: string): Promise<LngLat | null> {
+  try {
+    const url =
+      `https://nominatim.openstreetmap.org/search` +
+      `?q=${encodeURIComponent(query)}&countrycodes=lk&limit=1&format=json`;
+    const res  = await fetch(url, {
+      headers: { "Accept-Language": "en" },
+      signal:  AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.length) return null;
+    return { lng: parseFloat(data[0].lon), lat: parseFloat(data[0].lat) };
+  } catch { return null; }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,34 +141,19 @@ function ensureGoogle(cb: () => void) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function GoogleTrafficMap({ height = "560px" }: Props) {
-  const containerRef      = useRef<HTMLDivElement>(null);
+  const containerRef    = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const mapRef            = useRef<any>(null);
+  const mapRef          = useRef<any>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const trafficLayerRef   = useRef<any>(null);
+  const markersRef      = useRef<any[]>([]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const directionsRendRef = useRef<any>(null);
+  const originMarkerRef = useRef<any>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const directionsServRef = useRef<any>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const markersRef        = useRef<any[]>([]);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const originMarkerRef   = useRef<any>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const destMarkerRef     = useRef<any>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const infoWindowRef     = useRef<any>(null);
-  const mountedRef          = useRef(true);
-  const originACRef         = useRef<HTMLInputElement>(null);
-  const destACRef           = useRef<HTMLInputElement>(null);
+  const destMarkerRef   = useRef<any>(null);
+  const mountedRef      = useRef(true);
 
-  // GOOGLE_KEY is a build-time constant (process.env inlined by Next.js).
-  // Deriving the initial error from it here means we never need to call
-  // setMapError inside a useEffect, which satisfies react-hooks/set-state-in-effect.
-  const [mapReady,  setMapReady]  = useState(false);
-  const [mapError,  setMapError]  = useState<string>(
-    () => GOOGLE_KEY ? "" : "NEXT_PUBLIC_GOOGLE_MAPS_API_KEY is missing in .env.local"
-  );
+  const [mapReady,     setMapReady]     = useState(false);
+  const [mapError,     setMapError]     = useState("");
   const [points,       setPoints]       = useState<RealtimePoint[]>([]);
   const [loading,      setLoading]      = useState(false);
   const [fetchError,   setFetchError]   = useState("");
@@ -139,225 +164,206 @@ export default function GoogleTrafficMap({ height = "560px" }: Props) {
   const [showPanel,    setShowPanel]    = useState(true);
   const [originInput,  setOriginInput]  = useState("");
   const [destInput,    setDestInput]    = useState("");
-  const [origin,       setOrigin]       = useState<LatLng | null>(null);
-  const [dest,         setDest]         = useState<LatLng | null>(null);
+  const [origin,       setOrigin]       = useState<LngLat | null>(null);
+  const [dest,         setDest]         = useState<LngLat | null>(null);
   const [routeInfo,    setRouteInfo]    = useState<RouteInfo | null>(null);
   const [routeLoading, setRouteLoading] = useState(false);
   const [routeError,   setRouteError]   = useState("");
   const [pickMode,     setPickMode]     = useState<"origin" | "dest" | null>(null);
 
-  // ── Map init ─────────────────────────────────────────────────────────────
+  // ── Map init ───────────────────────────────────────────────────────────────
   useEffect(() => {
     mountedRef.current = true;
 
-    // mapError is already set in the useState initializer if key is missing.
-    // Skip map init entirely when there's no key.
-    if (!GOOGLE_KEY) return;
-
-    ensureGoogle(() => {
+    ensureMapLibre(() => {
       if (!mountedRef.current || !containerRef.current || mapRef.current) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const maplibregl = (window as any).maplibregl;
 
-      const G = window.google.maps;
-
+      let map;
       try {
-        // ── Real Google Map ──────────────────────────────────────────────
-        const map = new G.Map(containerRef.current, {
-          center:            SL_CENTER,
-          zoom:              SL_ZOOM,
-          mapTypeId:         G.MapTypeId.ROADMAP,
-          disableDefaultUI:  false,
-          zoomControl:       true,
-          mapTypeControl:    false,
-          streetViewControl: false,
-          fullscreenControl: false,
-          styles: [
-            // Subtle style — keeps road colors but reduces POI clutter
-            { featureType: "poi",               elementType: "labels", stylers: [{ visibility: "off" }] },
-            { featureType: "transit.station",   elementType: "labels", stylers: [{ visibility: "off" }] },
-          ],
+        map = new maplibregl.Map({
+          container: containerRef.current,
+          style:     MAP_STYLE,
+          center:    SL_CENTER,
+          zoom:      7.5,
         });
-        mapRef.current = map;
-
-        // ── Google TrafficLayer — exact same as Google Maps traffic ──────
-        const trafficLayer = new G.TrafficLayer();
-        trafficLayer.setMap(map);
-        trafficLayerRef.current = trafficLayer;
-
-        // ── Directions ───────────────────────────────────────────────────
-        directionsServRef.current = new G.DirectionsService();
-        directionsRendRef.current = new G.DirectionsRenderer({
-          map,
-          suppressMarkers:      true,  // we use custom A/B markers
-          polylineOptions: {
-            strokeColor:   "#2563eb",
-            strokeWeight:  6,
-            strokeOpacity: 0.9,
-          },
-        });
-
-        // ── Shared InfoWindow ────────────────────────────────────────────
-        infoWindowRef.current = new G.InfoWindow();
-
-        // ── Map click — pick origin / dest ───────────────────────────────
-        // Use google.maps.event.addListener — avoids TS2339 on typed Map ref
-        G.event.addListener(map, "click", (e: { latLng: { lat(): number; lng(): number } }) => {
-          if (!mountedRef.current) return;
-          const latlng = { lat: e.latLng.lat(), lng: e.latLng.lng() };
-          setPickMode((mode) => {
-            if (mode === "origin") {
-              setOrigin(latlng);
-              setOriginInput(`${latlng.lat.toFixed(5)}, ${latlng.lng.toFixed(5)}`);
-              return "dest";
-            }
-            if (mode === "dest") {
-              setDest(latlng);
-              setDestInput(`${latlng.lat.toFixed(5)}, ${latlng.lng.toFixed(5)}`);
-              return null;
-            }
-            return mode;
-          });
-        });
-
-        setMapReady(true);
       } catch (err) {
         setMapError(`Map failed to load: ${err instanceof Error ? err.message : String(err)}`);
+        return;
       }
+
+      mapRef.current = map;
+
+      map.on("error", (e: { error?: Error }) => {
+        if (e?.error?.message) console.warn("[MapLibre]", e.error.message);
+      });
+
+      map.on("load", () => {
+        if (!mountedRef.current) return;
+
+        // ── TomTom traffic layers (Google Maps style red/yellow/green) ────
+        if (TOMTOM) {
+          // Layer 1: absolute speed — main road colors
+          map.addSource("tt-flow-abs", {
+            type:     "raster",
+            tiles:    [`https://api.tomtom.com/traffic/map/4/tile/flow/absolute/{z}/{x}/{y}.png?key=${TOMTOM}&thickness=10`],
+            tileSize: 256,
+          });
+          map.addLayer({
+            id: "tt-flow-abs-layer", type: "raster", source: "tt-flow-abs",
+            paint: { "raster-opacity": 0.92, "raster-fade-duration": 0 },
+          });
+
+          // Layer 2: relative delay — deepens red in jammed areas
+          map.addSource("tt-flow-rel", {
+            type:     "raster",
+            tiles:    [`https://api.tomtom.com/traffic/map/4/tile/flow/relative-delay/{z}/{x}/{y}.png?key=${TOMTOM}&thickness=10`],
+            tileSize: 256,
+          });
+          map.addLayer({
+            id: "tt-flow-rel-layer", type: "raster", source: "tt-flow-rel",
+            paint: { "raster-opacity": 0.45, "raster-fade-duration": 0 },
+          });
+
+          // Layer 3: incidents (accidents, closures)
+          map.addSource("tt-incidents", {
+            type:     "raster",
+            tiles:    [`https://api.tomtom.com/traffic/map/4/tile/incidents/s3/{z}/{x}/{y}.png?key=${TOMTOM}`],
+            tileSize: 256,
+          });
+          map.addLayer({
+            id: "tt-incidents-layer", type: "raster", source: "tt-incidents",
+            paint: { "raster-opacity": 0.9, "raster-fade-duration": 0 },
+          });
+        }
+
+        // ── Route source + layers ─────────────────────────────────────────
+        map.addSource("route", {
+          type: "geojson",
+          data: { type: "Feature", geometry: { type: "LineString", coordinates: [] }, properties: {} },
+        });
+        map.addLayer({
+          id: "route-casing", type: "line", source: "route",
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint:  { "line-color": "#ffffff", "line-width": 10, "line-opacity": 0.85 },
+        });
+        map.addLayer({
+          id: "route-line", type: "line", source: "route",
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint:  { "line-color": "#2563eb", "line-width": 6, "line-opacity": 0.9 },
+        });
+
+        // Keep traffic layers below route
+        if (TOMTOM && map.getLayer("route-casing")) {
+          ["tt-flow-abs-layer", "tt-flow-rel-layer", "tt-incidents-layer"].forEach((id) => {
+            if (map.getLayer(id)) map.moveLayer(id, "route-casing");
+          });
+        }
+
+        setMapReady(true);
+      });
+
+      // Map click → pick origin / dest
+      map.on("click", (e: { lngLat: { lng: number; lat: number } }) => {
+        if (!mountedRef.current) return;
+        const lngLat = { lng: e.lngLat.lng, lat: e.lngLat.lat };
+        setPickMode((mode) => {
+          if (mode === "origin") {
+            setOrigin(lngLat);
+            setOriginInput(`${lngLat.lat.toFixed(4)}, ${lngLat.lng.toFixed(4)}`);
+            return "dest";
+          }
+          if (mode === "dest") {
+            setDest(lngLat);
+            setDestInput(`${lngLat.lat.toFixed(4)}, ${lngLat.lng.toFixed(4)}`);
+            return null;
+          }
+          return mode;
+        });
+      });
     });
 
     return () => {
       mountedRef.current = false;
-      // Google Maps doesn't need explicit destroy — just clear refs
-      markersRef.current.forEach((m) => { try { m.setMap(null); } catch { /**/ } });
+      markersRef.current.forEach((m) => { try { m.remove(); } catch { /**/ } });
       markersRef.current = [];
-      try { originMarkerRef.current?.setMap(null); } catch { /**/ }
-      try { destMarkerRef.current?.setMap(null);   } catch { /**/ }
+      try { originMarkerRef.current?.remove(); } catch { /**/ }
+      try { destMarkerRef.current?.remove();   } catch { /**/ }
       originMarkerRef.current = null;
       destMarkerRef.current   = null;
-      mapRef.current          = null;
+      if (mapRef.current) { try { mapRef.current.remove(); } catch { /**/ } mapRef.current = null; }
     };
   }, []);
 
-  // ── Places Autocomplete ───────────────────────────────────────────────────
+  // ── Traffic layer toggle ───────────────────────────────────────────────────
   useEffect(() => {
-    if (!mapReady) return;
-    const G = window.google.maps.places;
-
-    const setupAC = (
-      input: HTMLInputElement | null,
-      onPlace: (latlng: LatLng, addr: string) => void
-    ) => {
-      if (!input) return;
-      const ac = new G.Autocomplete(input, { componentRestrictions: { country: "lk" } });
-      ac.addListener("place_changed", () => {
-        const place = ac.getPlace();
-        if (!place?.geometry?.location) return;
-        const latlng = { lat: place.geometry.location.lat(), lng: place.geometry.location.lng() };
-        onPlace(latlng, place.formatted_address ?? input.value);
-      });
-    };
-
-    setupAC(originACRef.current, (latlng, addr) => {
-      setOrigin(latlng);
-      setOriginInput(addr);
-      mapRef.current?.panTo(latlng);
-      mapRef.current?.setZoom(12);
+    if (!mapReady || !mapRef.current || !TOMTOM) return;
+    const vis = trafficOn ? "visible" : "none";
+    ["tt-flow-abs-layer", "tt-flow-rel-layer", "tt-incidents-layer"].forEach((id) => {
+      if (mapRef.current.getLayer(id)) {
+        mapRef.current.setLayoutProperty(id, "visibility", vis);
+      }
     });
-
-    setupAC(destACRef.current, (latlng, addr) => {
-      setDest(latlng);
-      setDestInput(addr);
-      mapRef.current?.panTo(latlng);
-      mapRef.current?.setZoom(12);
-    });
-  }, [mapReady]);
-
-  // ── Traffic layer toggle ──────────────────────────────────────────────────
-  useEffect(() => {
-    if (!mapReady || !trafficLayerRef.current) return;
-    trafficLayerRef.current.setMap(trafficOn ? mapRef.current : null);
   }, [trafficOn, mapReady]);
 
-  // ── Cursor ────────────────────────────────────────────────────────────────
+  // ── Cursor ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!mapRef.current) return;
-    mapRef.current.setOptions({ draggableCursor: pickMode ? "crosshair" : "" });
+    mapRef.current.getCanvas().style.cursor = pickMode ? "crosshair" : "";
   }, [pickMode]);
 
-  // ── A/B custom markers ────────────────────────────────────────────────────
+  // ── A / B markers ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
-    const G = window.google.maps;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const maplibregl = (window as any).maplibregl;
 
-    const makePinSVG = (letter: string, color: string) =>
-      `data:image/svg+xml;charset=utf-8,` + encodeURIComponent(`
-        <svg xmlns="http://www.w3.org/2000/svg" width="36" height="44" viewBox="0 0 36 44">
-          <path d="M18 0C8 0 0 8 0 18c0 12 18 26 18 26S36 30 36 18C36 8 28 0 18 0z" fill="${color}"/>
-          <circle cx="18" cy="18" r="10" fill="white"/>
-          <text x="18" y="23" text-anchor="middle" font-family="sans-serif" font-size="13" font-weight="900" fill="${color}">${letter}</text>
-        </svg>`);
+    const makeEl = (letter: string, color: string) => {
+      const el = document.createElement("div");
+      el.style.cssText =
+        `width:36px;height:36px;border-radius:50% 50% 50% 0;background:${color};` +
+        `border:3px solid #fff;box-shadow:0 3px 10px rgba(0,0,0,0.3);` +
+        `transform:rotate(-45deg);display:flex;align-items:center;justify-content:center;`;
+      el.innerHTML = `<span style="transform:rotate(45deg);color:#fff;font-weight:900;font-size:13px">${letter}</span>`;
+      return el;
+    };
 
-    try { originMarkerRef.current?.setMap(null); } catch { /**/ }
+    try { originMarkerRef.current?.remove(); } catch { /**/ }
     if (origin) {
-      originMarkerRef.current = new G.Marker({
-        position: origin, map: mapRef.current,
-        icon: makePinSVG("A", "#2563eb"),
-        title: "Starting Point",
-        zIndex: 100,
-      });
+      originMarkerRef.current = new maplibregl.Marker({ element: makeEl("A", "#2563eb"), anchor: "bottom" })
+        .setLngLat([origin.lng, origin.lat]).addTo(mapRef.current);
     }
 
-    try { destMarkerRef.current?.setMap(null); } catch { /**/ }
+    try { destMarkerRef.current?.remove(); } catch { /**/ }
     if (dest) {
-      destMarkerRef.current = new G.Marker({
-        position: dest, map: mapRef.current,
-        icon: makePinSVG("B", "#16a34a"),
-        title: "Destination",
-        zIndex: 100,
-      });
+      destMarkerRef.current = new maplibregl.Marker({ element: makeEl("B", "#16a34a"), anchor: "bottom" })
+        .setLngLat([dest.lng, dest.lat]).addTo(mapRef.current);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [origin, dest, mapReady]);
 
-  // ── Route via Google Directions API ──────────────────────────────────────
+  // ── Route drawing ──────────────────────────────────────────────────────────
   const drawRoute = useCallback(async () => {
-    if (!origin || !dest || !mapReady) return;
-    const G = window.google.maps;
+    if (!origin || !dest || !mapReady || !mapRef.current) return;
+    setRouteLoading(true); setRouteError("");
 
-    setRouteLoading(true);
-    setRouteError("");
+    const info = await getRoute(origin, dest);
+    if (!mountedRef.current) return;
+    setRouteLoading(false);
 
-    if (!directionsServRef.current || !directionsRendRef.current) return;
-    directionsServRef.current.route(
-      {
-        origin:      new G.LatLng(origin.lat, origin.lng),
-        destination: new G.LatLng(dest.lat, dest.lng),
-        travelMode:  G.TravelMode.DRIVING,
-        drivingOptions: {
-          departureTime: new Date(),
-          trafficModel:  G.TrafficModel.BEST_GUESS,
-        },
-      },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (result: any, status: any) => {
-        if (!mountedRef.current) return;
-        setRouteLoading(false);
+    if (!info) { setRouteError("Route not found. Try different locations."); return; }
+    setRouteInfo(info);
+    mapRef.current.getSource("route")?.setData({
+      type: "Feature", geometry: info.geometry, properties: {},
+    });
 
-        if (status !== "OK") {
-          setRouteError(`Route not found: ${status}`);
-          return;
-        }
-
-        directionsRendRef.current?.setDirections(result);
-
-        const leg = result.routes[0].legs[0];
-        setRouteInfo({
-          distanceKm: Math.round(leg.distance.value / 100) / 10,
-          durationMin: Math.round(leg.duration_in_traffic
-            ? leg.duration_in_traffic.value / 60
-            : leg.duration.value / 60),
-        });
-      }
-    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const maplibregl = (window as any).maplibregl;
+    const coords = info.geometry.coordinates as [number, number][];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bounds = coords.reduce((b: any, c) => b.extend(c), new maplibregl.LngLatBounds(coords[0], coords[0]));
+    mapRef.current.fitBounds(bounds, { padding: 80, maxZoom: 14 });
   }, [origin, dest, mapReady]);
 
   useEffect(() => {
@@ -367,19 +373,29 @@ export default function GoogleTrafficMap({ height = "560px" }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [origin, dest]);
 
-  // ── Clear route ───────────────────────────────────────────────────────────
+  // ── Clear route ────────────────────────────────────────────────────────────
   const clearRoute = () => {
-    setOrigin(null); setDest(null);
-    setOriginInput(""); setDestInput("");
+    setOrigin(null); setDest(null); setOriginInput(""); setDestInput("");
     setRouteInfo(null); setRouteError(""); setPickMode(null);
-    try { originMarkerRef.current?.setMap(null); } catch { /**/ } originMarkerRef.current = null;
-    try { destMarkerRef.current?.setMap(null);   } catch { /**/ } destMarkerRef.current   = null;
-    directionsRendRef.current?.setDirections({ routes: [] });
-    mapRef.current?.panTo(SL_CENTER);
-    mapRef.current?.setZoom(SL_ZOOM);
+    try { originMarkerRef.current?.remove(); } catch { /**/ } originMarkerRef.current = null;
+    try { destMarkerRef.current?.remove();   } catch { /**/ } destMarkerRef.current   = null;
+    mapRef.current?.getSource("route")?.setData({
+      type: "Feature", geometry: { type: "LineString", coordinates: [] }, properties: {},
+    });
+    mapRef.current?.flyTo({ center: SL_CENTER, zoom: 7.5 });
   };
 
-  // ── TomTom data fetch ─────────────────────────────────────────────────────
+  // ── Place search ───────────────────────────────────────────────────────────
+  const handleSearch = async (type: "origin" | "dest") => {
+    const q = type === "origin" ? originInput : destInput;
+    if (!q.trim()) return;
+    const lngLat = await geocode(q);
+    if (!lngLat) { setRouteError(`"${q}" location not found.`); return; }
+    if (type === "origin") { setOrigin(lngLat); mapRef.current?.flyTo({ center: [lngLat.lng, lngLat.lat], zoom: 11 }); }
+    else                   { setDest(lngLat);   mapRef.current?.flyTo({ center: [lngLat.lng, lngLat.lat], zoom: 11 }); }
+  };
+
+  // ── TomTom data fetch ──────────────────────────────────────────────────────
   const fetchData = async () => {
     setLoading(true); setFetchError("");
     try {
@@ -402,50 +418,47 @@ export default function GoogleTrafficMap({ height = "560px" }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoRefresh]);
 
-  // ── TomTom point markers on Google Map ───────────────────────────────────
+  // ── Traffic point markers ──────────────────────────────────────────────────
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
-    const G = window.google.maps;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const maplibregl = (window as any).maplibregl;
 
-    markersRef.current.forEach((m) => { try { m.setMap(null); } catch { /**/ } });
+    markersRef.current.forEach((m) => { try { m.remove(); } catch { /**/ } });
     markersRef.current = [];
 
     points.forEach((p) => {
       const color = congestionColor(p.congestionLevel);
+      const el    = document.createElement("div");
+      el.style.cssText =
+        `width:44px;height:44px;border-radius:50%;background:${color};` +
+        `border:3px solid #fff;box-shadow:0 3px 10px rgba(0,0,0,0.25);` +
+        `display:flex;align-items:center;justify-content:center;` +
+        `flex-direction:column;color:#fff;font-size:11px;font-weight:800;` +
+        `cursor:pointer;line-height:1.1;text-align:center;transition:transform .15s;`;
+      el.innerHTML = `${p.currentSpeedKmh}<div style="font-size:8px;font-weight:600;opacity:.9">km/h</div>`;
+      el.onmouseenter = () => { el.style.transform = "scale(1.15)"; };
+      el.onmouseleave = () => { el.style.transform = "scale(1)"; };
+      el.onclick = () => setSelected((prev) => prev?.locationName === p.locationName ? null : p);
 
-      // Custom circle marker via SVG
-      const svgIcon = `data:image/svg+xml;charset=utf-8,` + encodeURIComponent(`
-        <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
-          <circle cx="24" cy="24" r="21" fill="${color}" stroke="white" stroke-width="3"/>
-          <text x="24" y="21" text-anchor="middle" font-family="sans-serif" font-size="13" font-weight="800" fill="white">${p.currentSpeedKmh}</text>
-          <text x="24" y="33" text-anchor="middle" font-family="sans-serif" font-size="9" font-weight="600" fill="white" opacity="0.9">km/h</text>
-        </svg>`);
-
-      const marker = new G.Marker({
-        position: { lat: p.latitude, lng: p.longitude },
-        map:      mapRef.current,
-        icon: svgIcon,
-        title:  p.locationName,
-        zIndex: 50,
-      });
-
-      G.event.addListener(marker, "click", () => {
-        setSelected((prev) => prev?.locationName === p.locationName ? null : p);
-        infoWindowRef.current?.setContent(`
-          <div style="min-width:170px;font-family:sans-serif;padding:6px">
-            <b style="color:${color};font-size:13px">🚗 ${p.locationName}</b>
-            <hr style="margin:6px 0;border-color:#eee"/>
-            <div style="font-size:12px;line-height:1.9">
-              ⚡ Current: <b>${p.currentSpeedKmh} km/h</b><br/>
-              🏎️ Free flow: <b>${p.freeFlowSpeedKmh} km/h</b><br/>
-              🚦 <b style="color:${color}">${p.congestionStatus}</b>
-            </div>
+      const popup = new maplibregl.Popup({ offset: 28 }).setHTML(`
+        <div style="min-width:160px;font-family:sans-serif;padding:6px">
+          <b style="color:${color};font-size:13px">🚗 ${p.locationName}</b>
+          <hr style="margin:5px 0;border-color:#eee"/>
+          <div style="font-size:12px;line-height:1.9">
+            ⚡ Current: <b>${p.currentSpeedKmh} km/h</b><br/>
+            🏎️ Free flow: <b>${p.freeFlowSpeedKmh} km/h</b><br/>
+            🚦 <b style="color:${color}">${p.congestionStatus}</b>
           </div>
-        `);
-        infoWindowRef.current?.open(mapRef.current, marker);
-      });
+        </div>
+      `);
 
-      markersRef.current.push(marker);
+      markersRef.current.push(
+        new maplibregl.Marker({ element: el })
+          .setLngLat([p.longitude, p.latitude])
+          .setPopup(popup)
+          .addTo(mapRef.current)
+      );
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [points, mapReady]);
@@ -454,18 +467,16 @@ export default function GoogleTrafficMap({ height = "560px" }: Props) {
     ? Math.round(points.reduce((s, p) => s + p.congestionLevel, 0) / points.length)
     : null;
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="relative w-full overflow-hidden rounded-3xl shadow-lg" style={{ height }}>
-      {/* Google Map container */}
       <div ref={containerRef} className="h-full w-full" />
 
-      {/* Loading */}
       {!mapReady && !mapError && (
         <div className="absolute inset-0 flex items-center justify-center rounded-3xl bg-slate-100">
           <div className="flex flex-col items-center gap-2">
             <Loader2 size={28} className="animate-spin text-blue-500" />
-            <p className="text-sm font-semibold text-slate-400">Loading Google Maps…</p>
+            <p className="text-sm font-semibold text-slate-400">Loading map…</p>
           </div>
         </div>
       )}
@@ -484,24 +495,22 @@ export default function GoogleTrafficMap({ height = "560px" }: Props) {
               <span className="text-sm font-bold text-slate-800">🗺️ Live Traffic Map</span>
               {lastFetch && <span className="text-xs text-slate-400">{lastFetch.toLocaleTimeString()}</span>}
             </div>
-
             <div className="ml-auto flex flex-wrap gap-2">
-              <button type="button" onClick={() => setTrafficOn((v) => !v)}
-                className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold shadow transition ${trafficOn ? "bg-red-500 text-white" : "bg-white/90 text-slate-600 hover:bg-white"}`}>
-                🚦 {trafficOn ? "Traffic ON" : "Traffic OFF"}
-              </button>
-
+              {TOMTOM && (
+                <button type="button" onClick={() => setTrafficOn((v) => !v)}
+                  className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold shadow transition ${trafficOn ? "bg-red-500 text-white" : "bg-white/90 text-slate-600 hover:bg-white"}`}>
+                  🚦 {trafficOn ? "Traffic ON" : "Traffic OFF"}
+                </button>
+              )}
               <button type="button" onClick={() => setShowPanel((v) => !v)}
                 className="flex items-center gap-1.5 rounded-xl bg-white/90 px-3 py-2 text-xs font-bold text-slate-700 shadow hover:bg-white transition">
                 <Route size={13} /> {showPanel ? "Hide" : "Route"}
               </button>
-
               <button type="button" onClick={() => setAutoRefresh((v) => !v)}
                 className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold shadow transition ${autoRefresh ? "bg-green-600 text-white" : "bg-white/90 text-slate-600 hover:bg-white"}`}>
                 {autoRefresh ? <Wifi size={13} /> : <WifiOff size={13} />}
                 {autoRefresh ? "Auto ON" : "Auto OFF"}
               </button>
-
               <button type="button" onClick={fetchData} disabled={loading}
                 className="flex items-center gap-1.5 rounded-xl bg-blue-600 px-3 py-2 text-xs font-bold text-white shadow hover:bg-blue-700 disabled:opacity-60 transition">
                 {loading ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
@@ -529,41 +538,37 @@ export default function GoogleTrafficMap({ height = "560px" }: Props) {
                 </div>
               )}
 
-              {/* Origin — Google Places Autocomplete */}
               <div className="mb-2">
                 <label className="mb-1 flex items-center gap-1.5 text-xs font-bold text-slate-600">
                   <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white">A</span>
                   Starting Point
                 </label>
                 <div className="flex gap-1">
-                  <input ref={originACRef} type="text" value={originInput}
-                    onChange={(e) => setOriginInput(e.target.value)}
+                  <input type="text" value={originInput} onChange={(e) => setOriginInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleSearch("origin")}
                     placeholder="Search or click map…"
                     className="flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700 outline-none focus:border-blue-400" />
-                  <button type="button"
-                    onClick={() => setPickMode((m) => m === "origin" ? null : "origin")}
-                    className={`rounded-xl px-2.5 text-xs font-bold transition ${pickMode === "origin" ? "bg-blue-600 text-white" : "bg-blue-50 text-blue-700 hover:bg-blue-100"}`}>
-                    <MapPin size={13} />
-                  </button>
+                  <button type="button" onClick={() => handleSearch("origin")}
+                    className="rounded-xl bg-blue-600 px-2.5 text-white hover:bg-blue-700"><MapPin size={13} /></button>
+                  <button type="button" onClick={() => setPickMode((m) => m === "origin" ? null : "origin")}
+                    className={`rounded-xl px-2.5 text-xs font-bold transition ${pickMode === "origin" ? "bg-blue-600 text-white" : "bg-blue-50 text-blue-700 hover:bg-blue-100"}`}>Pin</button>
                 </div>
               </div>
 
-              {/* Destination — Google Places Autocomplete */}
               <div className="mb-3">
                 <label className="mb-1 flex items-center gap-1.5 text-xs font-bold text-slate-600">
                   <span className="flex h-5 w-5 items-center justify-center rounded-full bg-green-600 text-[10px] font-bold text-white">B</span>
                   Destination
                 </label>
                 <div className="flex gap-1">
-                  <input ref={destACRef} type="text" value={destInput}
-                    onChange={(e) => setDestInput(e.target.value)}
+                  <input type="text" value={destInput} onChange={(e) => setDestInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleSearch("dest")}
                     placeholder="Search or click map…"
                     className="flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700 outline-none focus:border-green-400" />
-                  <button type="button"
-                    onClick={() => setPickMode((m) => m === "dest" ? null : "dest")}
-                    className={`rounded-xl px-2.5 text-xs font-bold transition ${pickMode === "dest" ? "bg-green-600 text-white" : "bg-green-50 text-green-700 hover:bg-green-100"}`}>
-                    <MapPin size={13} />
-                  </button>
+                  <button type="button" onClick={() => handleSearch("dest")}
+                    className="rounded-xl bg-green-600 px-2.5 text-white hover:bg-green-700"><MapPin size={13} /></button>
+                  <button type="button" onClick={() => setPickMode((m) => m === "dest" ? null : "dest")}
+                    className={`rounded-xl px-2.5 text-xs font-bold transition ${pickMode === "dest" ? "bg-green-600 text-white" : "bg-green-50 text-green-700 hover:bg-green-100"}`}>Pin</button>
                 </div>
               </div>
 
@@ -608,7 +613,7 @@ export default function GoogleTrafficMap({ height = "560px" }: Props) {
 
               {!origin && !dest && (
                 <p className="text-center text-[11px] text-slate-400 mt-2">
-                  Search with Google Places above or click <b>📍</b> then click on map
+                  Search locations above or click <b>Pin</b> then click on the map
                 </p>
               )}
             </div>
@@ -617,7 +622,7 @@ export default function GoogleTrafficMap({ height = "560px" }: Props) {
           {/* SELECTED POINT CARD */}
           {selected && (
             <div className="absolute right-3 top-16 z-[1000] w-52 rounded-3xl border border-white/60 bg-white/95 p-4 shadow-xl backdrop-blur-sm">
-              <button type="button" onClick={() => { setSelected(null); infoWindowRef.current?.close(); }}
+              <button type="button" onClick={() => setSelected(null)}
                 className="absolute right-3 top-3 text-slate-400 hover:text-slate-600"><X size={14} /></button>
               <p className="text-xs text-slate-400 mb-1">TomTom Live</p>
               <p className="font-bold text-slate-800 text-sm mb-3">🚗 {selected.locationName}</p>
@@ -636,7 +641,7 @@ export default function GoogleTrafficMap({ height = "560px" }: Props) {
             </div>
           )}
 
-          {/* BOTTOM STATS STRIP */}
+          {/* BOTTOM STATS */}
           {points.length > 0 && (
             <div className="absolute bottom-3 left-3 right-3 z-[1000]">
               <div className="flex gap-2 overflow-x-auto pb-1">
@@ -661,6 +666,17 @@ export default function GoogleTrafficMap({ height = "560px" }: Props) {
               </div>
             </div>
           )}
+
+          {/* LEGEND */}
+          <div className="absolute bottom-3 right-3 z-[1000] flex flex-col gap-1 rounded-2xl bg-white/90 px-3 py-2 shadow">
+            <p className="text-[10px] font-bold text-slate-500 mb-0.5">Traffic</p>
+            {[["#22c55e", "Low"], ["#f59e0b", "Moderate"], ["#ef4444", "High"]].map(([c, l]) => (
+              <div key={l} className="flex items-center gap-1.5">
+                <span className="h-2.5 w-2.5 rounded-full" style={{ background: c }} />
+                <span className="text-[10px] text-slate-600">{l}</span>
+              </div>
+            ))}
+          </div>
 
           {/* PICK HINT */}
           {pickMode && (

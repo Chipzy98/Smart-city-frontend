@@ -14,8 +14,8 @@ import {
   analyseRouteFromApiAsync,
 } from "../api/smartCityApi";
 import type { LatLng, RouteOption } from "@/components/maps/TrafficMap";
-import PlacesAutocomplete from "@/components/maps/PlacesAutocomplete";
 import GoogleTrafficMap from "@/components/maps/GoogleTrafficMap";
+import PlacesAutocomplete from "@/components/maps/PlacesAutocomplete";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 type PageTab = "predict" | "route";

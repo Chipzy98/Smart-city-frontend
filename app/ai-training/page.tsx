@@ -157,7 +157,7 @@ export default function AITrainingPage() {
       <div className="space-y-6">
 
         {/* Header */}
-        <div className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-[#1E3A8A]/90 via-[#2563EB]/90 to-[#10B981]/90 p-6 text-white shadow-2xl">
+        <div className="relative overflow-hidden rounded-3xl bg-linear-to-r from-[#1E3A8A]/90 via-[#2563EB]/90 to-[#10B981]/90 p-6 text-white shadow-2xl">
           <div className="absolute -right-10 -top-10 h-32 w-32 rounded-full bg-white/10 blur-2xl" />
           <div className="relative flex items-center gap-4">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white/20 backdrop-blur">
@@ -182,7 +182,7 @@ export default function AITrainingPage() {
                   key={key}
                   type="button"
                   onClick={() => { setActiveModule(key); handleReset(); }}
-                  className={`flex items-center gap-3 rounded-2xl p-4 font-bold text-white shadow-lg transition hover:scale-[1.02] bg-gradient-to-br ${cfg.color} ${
+                  className={`flex items-center gap-3 rounded-2xl p-4 font-bold text-white shadow-lg transition hover:scale-[1.02] bg-linear-to-br ${cfg.color} ${
                     activeModule === key
                       ? "ring-4 ring-offset-2 ring-blue-400"
                       : "opacity-70"
@@ -201,7 +201,7 @@ export default function AITrainingPage() {
           {/* Upload Panel */}
           <div className="relative overflow-hidden rounded-3xl border border-white/30 bg-white/20 p-6 shadow-2xl backdrop-blur-xl">
             <div className="mb-5 flex items-center gap-3">
-              <div className={`flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br ${config.color} text-white shadow`}>
+              <div className={`flex h-10 w-10 items-center justify-center rounded-2xl bg-linear-to-br ${config.color} text-white shadow`}>
                 <Icon size={20} />
               </div>
               <div>
@@ -260,7 +260,7 @@ export default function AITrainingPage() {
                 type="button"
                 onClick={handleTrain}
                 disabled={loading || !csvText.trim()}
-                className={`flex flex-1 items-center justify-center gap-2 rounded-2xl bg-gradient-to-r ${config.color} py-3 font-bold text-white shadow-lg transition hover:scale-[1.02] disabled:opacity-50`}
+                className={`flex flex-1 items-center justify-center gap-2 rounded-2xl bg-linear-to-r ${config.color} py-3 font-bold text-white shadow-lg transition hover:scale-[1.02] disabled:opacity-50`}
               >
                 {loading ? <Loader2 size={18} className="animate-spin" /> : <TrendingUp size={18} />}
                 {loading ? "Training…" : "Train AI"}

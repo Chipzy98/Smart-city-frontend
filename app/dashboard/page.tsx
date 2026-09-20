@@ -32,6 +32,7 @@ function getUserRole(): Role {
 
   try {
     const storedUser = localStorage.getItem("user");
+
     if (!storedUser) return "user";
 
     const user = JSON.parse(storedUser) as User;
@@ -52,24 +53,28 @@ function getUserRole(): Role {
 
 export default function DashboardPage() {
   const [data, setData] = useState<DashboardData | null>(null);
-  const [role, setRole] = useState<Role>("user");
+
+  // Initialize role directly instead of setting it inside useEffect
+  const [role] = useState<Role>(() => getUserRole());
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [darkMode, setDarkMode] = useState(false);
 
-  useEffect(() => {
+  // Initialize dark mode directly from localStorage
+  const [darkMode, setDarkMode] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+
     const savedTheme = localStorage.getItem("theme");
-    setDarkMode(savedTheme === "dark");
-  }, []);
+    return savedTheme === "dark";
+  });
 
+  // Save theme whenever darkMode changes
   useEffect(() => {
     localStorage.setItem("theme", darkMode ? "dark" : "light");
   }, [darkMode]);
 
+  // Load dashboard data
   useEffect(() => {
-    const currentRole = getUserRole();
-    setRole(currentRole);
-
     const loadDashboard = async () => {
       try {
         setLoading(true);
@@ -77,9 +82,9 @@ export default function DashboardPage() {
 
         let result: DashboardData;
 
-        if (currentRole === "admin") {
+        if (role === "admin") {
           result = await getAdminDashboardFromApiAsync();
-        } else if (currentRole === "manager") {
+        } else if (role === "manager") {
           result = await getManagerDashboardFromApiAsync();
         } else {
           result = await getUserDashboardFromApiAsync();
@@ -95,9 +100,10 @@ export default function DashboardPage() {
     };
 
     void loadDashboard();
-  }, []);
+  }, [role]);
 
   const totalWasteValue = data?.totalWasteRecords ?? data?.totalWaste ?? 0;
+
   const totalEnergyValue =
     data?.totalEnergyRecords ?? data?.totalEnergyUsage ?? 0;
 
@@ -110,12 +116,12 @@ export default function DashboardPage() {
       <div
         className={`min-h-screen rounded-3xl p-4 transition-all duration-300 md:p-6 ${
           darkMode
-            ? "bg-gradient-to-br from-slate-950 via-blue-950 to-emerald-950"
-            : "bg-gradient-to-br from-blue-50 via-white to-green-50"
+            ? "bg-linear-to-br from-slate-950 via-blue-950 to-emerald-950"
+            : "bg-linear-to-br from-blue-50 via-white to-green-50"
         }`}
       >
         {/* Header */}
-        <div className="mb-8 overflow-hidden rounded-3xl border border-white/20 bg-gradient-to-r from-[#1E3A8A]/90 via-[#2563EB]/90 to-[#10B981]/90 p-6 text-white shadow-2xl backdrop-blur-xl">
+        <div className="mb-8 overflow-hidden rounded-3xl border border-white/20 bg-linear-to-r from-[#1E3A8A]/90 via-[#2563EB]/90 to-[#10B981]/90 p-6 text-white shadow-2xl backdrop-blur-xl">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div>
               <p className="mb-2 text-sm font-medium text-green-100">
@@ -137,6 +143,7 @@ export default function DashboardPage() {
                 <p className="text-xs uppercase tracking-wide text-green-100">
                   Current Role
                 </p>
+
                 <p className="text-lg font-bold capitalize">{role}</p>
               </div>
 
@@ -208,11 +215,15 @@ export default function DashboardPage() {
 
             {/* Quick Summary */}
             <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
-              <div className={`rounded-3xl border p-6 transition hover:-translate-y-1 ${glassCard}`}>
+              <div
+                className={`rounded-3xl border p-6 transition hover:-translate-y-1 ${glassCard}`}
+              >
                 <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-500/20 text-2xl">
                   🚦
                 </div>
+
                 <h3 className="text-lg font-bold">Traffic Monitoring</h3>
+
                 <p
                   className={`mt-2 text-sm ${
                     darkMode ? "text-blue-100" : "text-gray-600"
@@ -222,11 +233,15 @@ export default function DashboardPage() {
                 </p>
               </div>
 
-              <div className={`rounded-3xl border p-6 transition hover:-translate-y-1 ${glassCard}`}>
+              <div
+                className={`rounded-3xl border p-6 transition hover:-translate-y-1 ${glassCard}`}
+              >
                 <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-green-500/20 text-2xl">
                   ♻️
                 </div>
+
                 <h3 className="text-lg font-bold">Waste Insights</h3>
+
                 <p
                   className={`mt-2 text-sm ${
                     darkMode ? "text-green-100" : "text-gray-600"
@@ -236,11 +251,15 @@ export default function DashboardPage() {
                 </p>
               </div>
 
-              <div className={`rounded-3xl border p-6 transition hover:-translate-y-1 ${glassCard}`}>
+              <div
+                className={`rounded-3xl border p-6 transition hover:-translate-y-1 ${glassCard}`}
+              >
                 <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-teal-500/20 text-2xl">
                   ⚡
                 </div>
+
                 <h3 className="text-lg font-bold">Energy Usage</h3>
+
                 <p
                   className={`mt-2 text-sm ${
                     darkMode ? "text-teal-100" : "text-gray-600"
@@ -256,6 +275,7 @@ export default function DashboardPage() {
               <div className={`rounded-3xl border p-5 ${glassCard}`}>
                 <div className="mb-4">
                   <h2 className="text-xl font-bold">City Activity Trend</h2>
+
                   <p
                     className={`text-sm ${
                       darkMode ? "text-blue-100" : "text-gray-500"
@@ -277,6 +297,7 @@ export default function DashboardPage() {
                   >
                     AI Insight
                   </h2>
+
                   <p
                     className={`text-sm ${
                       darkMode ? "text-green-100" : "text-gray-500"

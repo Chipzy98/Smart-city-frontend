@@ -152,7 +152,7 @@ export default function TrafficPage() {
             <button key={t.id} type="button" onClick={() => setTab(t.id)}
               className={`flex flex-1 items-center justify-center gap-2 rounded-xl py-2.5 text-sm font-bold transition ${
                 tab === t.id
-                  ? "bg-gradient-to-r from-blue-600 to-green-500 text-white shadow"
+                  ? "bg-linear-to-r from-blue-600 to-green-500 text-white shadow"
                   : "text-slate-500 hover:text-slate-800"
               }`}
             >
@@ -197,7 +197,7 @@ export default function TrafficPage() {
                 </div>
               </div>
               <button type="button" onClick={predict} disabled={predLoading}
-                className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-blue-600 to-green-500 py-3 font-bold text-white shadow-lg transition hover:scale-[1.01] disabled:opacity-60">
+                className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-linear-to-r from-blue-600 to-green-500 py-3 font-bold text-white shadow-lg transition hover:scale-[1.01] disabled:opacity-60">
                 {predLoading && <Loader2 size={18} className="animate-spin"/>}
                 {predLoading ? "Predicting…" : "Predict Traffic"}
               </button>
@@ -322,7 +322,7 @@ export default function TrafficPage() {
                   </span>
                 </div>
                 <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
-                  <div className="h-full rounded-full bg-gradient-to-r from-blue-600 to-green-500 transition-all duration-500"
+                  <div className="h-full rounded-full bg-linear-to-r from-blue-600 to-green-500 transition-all duration-500"
                     style={{ width: originLatLng && destLatLng ? "100%" : originLatLng || destLatLng ? "50%" : "0%" }}/>
                 </div>
               </div>
@@ -332,7 +332,7 @@ export default function TrafficPage() {
                   className="rounded-2xl border border-slate-200 bg-white/70 px-4 py-3 text-sm font-bold text-slate-600 hover:bg-white">Clear</button>
                 <button type="button" onClick={analyseRoute}
                   disabled={routeLoading || !originLatLng || !destLatLng}
-                  className="flex flex-1 items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-green-500 to-blue-600 py-3 font-bold text-white shadow-lg transition hover:scale-[1.01] disabled:opacity-50">
+                  className="flex flex-1 items-center justify-center gap-2 rounded-2xl bg-linear-to-r from-green-500 to-blue-600 py-3 font-bold text-white shadow-lg transition hover:scale-[1.01] disabled:opacity-50">
                   {routeLoading && <Loader2 size={18} className="animate-spin"/>}
                   {routeLoading ? "Getting Routes…" : "🗺️ Get Route Suggestions"}
                 </button>
@@ -456,7 +456,7 @@ export default function TrafficPage() {
 
               <div className="rounded-3xl border border-white/30 bg-white/20 p-5 shadow-xl">
                 <h3 className="mb-2 flex items-center gap-2 font-bold text-slate-900"><History size={16}/> Recent Routes</h3>
-                <p className="text-center text-xs text-slate-400 py-2">Route analyse කළාම history show වෙනවා.</p>
+                <p className="text-center text-xs text-slate-400 py-2"></p>
               </div>
             </div>
           </div>

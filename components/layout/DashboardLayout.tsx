@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Sidebar from "./Sidebar";
 import Navbar from "./Navbar";
 
@@ -11,12 +11,12 @@ export default function DashboardLayout({
   children: React.ReactNode;
   title: string;
 }) {
-  const [darkMode, setDarkMode] = useState(false);
+  const [darkMode] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
 
-  useEffect(() => {
     const saved = localStorage.getItem("theme");
-    setDarkMode(saved === "dark");
-  }, []);
+    return saved === "dark";
+  });
 
   return (
     <div
